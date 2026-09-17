@@ -6,8 +6,8 @@ struct GarageView: View {
     @State private var page = 0
     @State private var showingProblem = false
     private let pageSize = 2
-    private var pageCount: Int { max(1, (garage.cars.count + pageSize - 1) / pageSize) }
-    private var visibleCars: [ParkedCar] { Array(garage.cars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
+    private var pageCount: Int { max(1, (garage.displayedCars.count + pageSize - 1) / pageSize) }
+    private var visibleCars: [ParkedCar] { Array(garage.displayedCars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
 
     var body: some View {
         ZStack {
@@ -27,37 +27,29 @@ struct GarageView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                if garage.cars.isEmpty {
-                    VStack(spacing: 10) {
-                        PaintedParkingSpace().frame(width: 138, height: 148)
-                        Text("Nothing parked").font(.system(size: 13)).foregroundStyle(ParkingStyle.secondary)
-                    }
+                if garage.displayedCars.isEmpty {
+                    NewParkingBay(large: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     HStack(alignment: .top, spacing: 14) {
-                        NewParkingBay().frame(width: 112)
-                        ForEach(visibleCars) { ParkedBay(car: $0).frame(maxWidth: .infinity) }
+                        NewParkingBay().frame(width: 138)
+                        ForEach(visibleCars) { ParkedBay(car: $0).frame(maxWidth: 177) }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
                 status
-                HStack(spacing: 10) {
-                    Button("Park my windows") { garage.parkAll() }
-                        .accessibilityIdentifier("park-all-windows")
-                        .buttonStyle(ParkingButtonStyle(prominent: true))
-                        .disabled(garage.busy || garage.pendingRemoval != nil)
-                    Button("Reopen my windows") { garage.reopenAll() }
-                        .accessibilityIdentifier("reopen-all-windows")
-                        .buttonStyle(ParkingButtonStyle())
-                        .disabled(garage.busy || garage.pendingRemoval != nil || garage.cars.isEmpty)
-                }
-                .frame(maxWidth: .infinity)
             }
             .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 18)
         }
         .foregroundStyle(ParkingStyle.ink)
         .task { garage.load() }
-        .onChange(of: garage.cars.count) { _, _ in page = min(page, pageCount - 1) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // A CLI may need more than a few seconds to publish its identity.
+            // Recheck on return to the app; no daemon or continuous polling.
+            if !garage.isPreview { garage.scan() }
+        }
+        .onChange(of: garage.displayedCars.count) { _, _ in page = min(page, pageCount - 1) }
+        .sheet(isPresented: $garage.showingArchive) { ArchiveView().environmentObject(garage) }
         .sheet(item: $garage.selectedCar) { CarDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.recoveryCar) { RecoveryDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.selectedWindow) { WindowDetails(window: $0).environmentObject(garage) }
@@ -87,8 +79,9 @@ struct GarageView: View {
             Button { garage.scan() } label: { Image(systemName: "arrow.clockwise").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).disabled(garage.busy).help("Refresh window count")
                 .accessibilityLabel("Refresh window count")
-            Button { garage.revealGarage() } label: { Image(systemName: "archivebox").frame(width: 22, height: 28) }
-                .buttonStyle(.plain).help("Recovery files").accessibilityLabel("Recovery files")
+            Button { garage.showingArchive = true } label: { Image(systemName: "archivebox").frame(width: 22, height: 28) }
+                .buttonStyle(.plain).help("Archived cars").accessibilityLabel("Archived cars")
+                .accessibilityIdentifier("show-archive")
         }
         .padding(.bottom, 2)
     }
@@ -114,14 +107,21 @@ struct GarageView: View {
 
 private struct NewParkingBay: View {
     @EnvironmentObject private var garage: Garage
+    var large = false
     var body: some View {
-        VStack(spacing: 8) {
-            Color.clear.frame(height: 22)
+        VStack(spacing: 13) {
+            if !large { Color.clear.frame(height: 22) }
             Button { garage.parkAll() } label: {
-                PaintedParkingSpace().frame(width: 94, height: 106)
+                PaintedParkingSpace().frame(width: large ? 144 : 112, height: large ? 152 : 106)
             }
             .buttonStyle(.plain).disabled(garage.busy || garage.pendingRemoval != nil)
             .help("Save and close my iTerm windows").accessibilityLabel("Park my windows")
+            .accessibilityIdentifier("park-bay")
+            Button("Park my windows") { garage.parkAll() }
+                .buttonStyle(ParkingButtonStyle(prominent: true))
+                .disabled(garage.busy || garage.pendingRemoval != nil)
+                .accessibilityIdentifier("park-all-windows")
+            if !large { Color.clear.frame(height: 40) }
         }
     }
 }
@@ -143,7 +143,7 @@ private struct ParkedBay: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(working ? (garage.removingCar ? "Checking…" : "Opening…") : car.hasReturned ? "Opened" : "")
+                Text(working ? (garage.removingCar ? "Checking…" : "Opening…") : car.hasReturned ? "Not yet verified" : "")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(ParkingStyle.secondary)
                 Spacer(minLength: 0)
                 Button { showingActions.toggle() } label: {
@@ -157,15 +157,14 @@ private struct ParkedBay: View {
                     CarActions(car: car) { showingActions = false }.environmentObject(garage)
                 }
             }
-            // Keep the double-click target separate from all menu/remove buttons.
+            // One click opens. The options menu remains a separate target.
             VStack(spacing: 6) {
                 ZStack {
                     BayMarkings().stroke(ParkingStyle.secondary.opacity(hovered ? 0.8 : 0.55),
                                          style: StrokeStyle(lineWidth: 3, lineCap: .round))
                         .padding(.horizontal, 6)
-                    CarIllustration(color: color).frame(width: 54, height: 98)
-                        .compositingGroup().shadow(color: .black.opacity(0.4), radius: 5, x: 4, y: 6)
-                        .offset(y: hovered && !reduceMotion ? -4 : 0)
+                    AnimatedParkedCar(color: color, arriving: garage.arrivingAt[car.id],
+                                      departing: garage.departingAt[car.id], hovered: hovered)
                 }
                 .frame(height: 106)
                 TimelineView(.periodic(from: .now, by: 60)) { context in
@@ -190,11 +189,11 @@ private struct ParkedBay: View {
             Text(car.displayTitle).font(.system(size: 11, weight: .medium))
                 .lineLimit(1).help(car.displayTitle)
             if car.hasReturned {
-                Button("Remove car") { garage.removeCar(car) }
-                    .accessibilityIdentifier("remove-car-" + car.id)
+                Button("Check again") { garage.open(car) }
+                    .accessibilityIdentifier("check-car-" + car.id)
                     .buttonStyle(ParkingButtonStyle())
                     .disabled(garage.busy)
-                    .help("Remove immediately if the saved tabs match. Otherwise ask first. Recovery is always kept.")
+                    .help("Keep this car until all saved tabs can be identified. Click to check again.")
                     .padding(.top, 3)
             }
             if let issue = garage.issue(for: car), !working {
@@ -256,5 +255,84 @@ struct CarActions: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Only the illustration moves: data is already safely saved or archived before
+/// these purely decorative manoeuvres begin. Reduced Motion skips the journey.
+private struct AnimatedParkedCar: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let color: Color
+    let arriving: Date?
+    let departing: Date?
+    let hovered: Bool
+    @State private var animating = false
+
+    private var start: Date? { departing ?? arriving }
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60, paused: !animating || reduceMotion)) { context in
+            let elapsed = start.map { context.date.timeIntervalSince($0) } ?? 10
+            let pose = CarManoeuvre.pose(at: elapsed, departing: departing != nil)
+            CarIllustration(color: color).frame(width: 54, height: 98)
+                .compositingGroup().shadow(color: .black.opacity(0.4), radius: 5, x: 4, y: 6)
+                .rotationEffect(.degrees(reduceMotion ? 0 : pose.angle))
+                .offset(x: reduceMotion ? 0 : pose.x,
+                        y: reduceMotion ? 0 : pose.y + (hovered && !animating ? -4 : 0))
+                .opacity(reduceMotion ? (departing == nil ? 1 : 0) : pose.opacity)
+        }
+        .task(id: start) {
+            guard let start, Date().timeIntervalSince(start) < 1.8 else { return }
+            animating = true
+            try? await Task.sleep(for: .milliseconds(1800))
+            animating = false
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+struct ArchiveView: View {
+    @EnvironmentObject private var garage: Garage
+    var exporting = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Archived cars").font(.system(size: 21, weight: .semibold))
+                Spacer()
+                Button("Done") { garage.showingArchive = false }.keyboardShortcut(.cancelAction)
+            }
+            Text("Your recovery backups stay here, just in case.")
+                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+            if garage.archives.isEmpty {
+                Label("No archived cars yet", systemImage: "archivebox")
+                    .foregroundStyle(ParkingStyle.secondary).frame(maxWidth: .infinity, minHeight: 120)
+            } else {
+                if exporting { rows }
+                else { ScrollView { rows }.frame(maxHeight: 250) }
+            }
+            Button("Show recovery files in Finder") { garage.revealGarage() }
+                .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(ParkingStyle.secondary)
+        }
+        .padding(22).frame(width: 480).background(ParkingStyle.background)
+        .foregroundStyle(ParkingStyle.ink)
+    }
+
+    private var rows: some View {
+        VStack(spacing: 10) {
+            ForEach(garage.archives) { car in
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(car.displayTitle).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                        Text("\(car.date.formatted(date: .abbreviated, time: .shortened)) · \(car.tabs.count) tabs")
+                            .font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Button("Bring back car") { garage.bringBack(car) }
+                        .buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
+                        .accessibilityIdentifier("unarchive-car-" + car.id)
+                }
+                .padding(12).background(ParkingStyle.surface, in: RoundedRectangle(cornerRadius: 9))
+            }
+        }
     }
 }

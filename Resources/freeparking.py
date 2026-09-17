@@ -1,7 +1,8 @@
 #!/usr/bin/python3
 """Free Parking's local-only backend. Importing this module does nothing to iTerm.
 
-list: disk only. scan: read-only discovery. park/restore: explicit mutations.
+list: disk only. scan: read-only terminal discovery plus verified auto-archival.
+park/restore: explicit terminal mutations.
 No agents, hooks, preferences, Accessibility, shell history, or network services.
 """
 from __future__ import annotations
@@ -11,6 +12,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -64,6 +66,23 @@ def run(args, timeout=20, input=None):
 
 class ITerm:
     def call(self, action, **kwargs):
+        if action in ("close", "set-title"):
+            if action == "close":
+                self.call("check", **kwargs)
+            runtime = iterm_python_runtime()
+            if runtime:
+                # Only use an API the user already enabled. Never turn it on,
+                # install a runtime, or alter their ordinary close preference.
+                try:
+                    output = run([str(runtime), str(Path(__file__).with_name("iterm_api.py")),
+                                  json.dumps({"action": action, **kwargs})], timeout=30)
+                    reply = json.loads(output)
+                except Exception as error:
+                    raise ParkError("The iTerm operation did not finish. Recovery is kept; check iTerm before retrying.") from error
+                if reply.get("state") == ("closed" if action == "close" else "updated"):
+                    return {"ok": True}
+                if reply.get("state") != "unavailable":
+                    raise ParkError(reply.get("error", "The saved window changed. Nothing else was closed."))
         request = json.dumps({"action": action, **kwargs})
         # The close confirmation is the user's to answer, not a timer's.
         timeout = None if action == "close" else 45
@@ -79,6 +98,22 @@ class ITerm:
 
     def windows(self):
         return self.call("list")
+
+
+def iterm_python_runtime():
+    """An optional, already-installed iTerm runtime. No downloads or setup."""
+    preference = subprocess.run(["/usr/bin/defaults", "read", "com.googlecode.iterm2", "EnableAPIServer"],
+                                capture_output=True, text=True, timeout=5)
+    if preference.returncode or preference.stdout.strip() != "1":
+        return None
+    root = Path.home() / "Library/Application Support/iTerm2/iterm2env/versions"
+    versions = sorted((p for p in root.glob("*") if re.fullmatch(r"\d+\.\d+\.\d+", p.name)),
+                      key=lambda p: tuple(map(int, p.name.split("."))), reverse=True)
+    for version in versions:
+        binary = version / "bin/python3"
+        if binary.is_file() and list(version.glob("lib/python*/site-packages/iterm2/__init__.py")):
+            return binary
+    return None
 
 
 class Processes:
@@ -337,6 +372,13 @@ def fingerprint(window):
     return hashlib.sha256(json.dumps(identity).encode()).hexdigest()
 
 
+def valid_bounds(value):
+    return (isinstance(value, dict)
+            and all(type(value.get(k)) in (int, float) and math.isfinite(value[k])
+                    for k in ("x", "y", "width", "height"))
+            and value["width"] > 0 and value["height"] > 0)
+
+
 def discover(iterm, process_api):
     windows = iterm.windows()
     processes, hooks = process_api.all(), read_hook_records()
@@ -345,6 +387,10 @@ def discover(iterm, process_api):
         tabs = [resolve_tab(t, processes, process_api, hooks) for t in w["tabs"]]
         row = {"id": w["id"], "title": w["title"], "tabs": tabs,
                "can_park": bool(tabs) and all(not t["issue"] for t in tabs)}
+        if w.get("bounds") is not None:
+            if not valid_bounds(w["bounds"]):
+                raise ParkError("iTerm returned an unreadable window size. Nothing was closed.")
+            row["bounds"] = w["bounds"]
         row["fingerprint"] = fingerprint(row)
         result.append(row)
     return result
@@ -394,11 +440,19 @@ class Store:
                         or not isinstance(target, dict)
                         or not all(isinstance(target.get(k), str) for k in ("window_id", "terminal_id"))):
                     raise ValueError("Invalid restored target")
+                if "title_pending" in target and type(target["title_pending"]) is not bool:
+                    raise ValueError("Invalid tab title restoration progress")
             pending = car.get("pending_tab")
             if pending is not None and (type(pending) is not int or not 0 <= pending < len(car["tabs"])):
                 raise ValueError("Invalid pending tab")
             if car.get("window_title") is not None and not isinstance(car["window_title"], str):
                 raise ValueError("Invalid saved window title")
+            if car.get("window_bounds") is not None and not valid_bounds(car["window_bounds"]):
+                raise ValueError("Invalid saved window size")
+            if car.get("created_window_id") is not None and not isinstance(car["created_window_id"], str):
+                raise ValueError("Invalid created window identity")
+            if "bounds_pending" in car and type(car["bounds_pending"]) is not bool:
+                raise ValueError("Invalid window restoration progress")
             return car
         except (OSError, ValueError, KeyError, TypeError) as error:
             raise ParkError("Cannot read this car's recovery file: " + str(error))
@@ -428,12 +482,12 @@ class Store:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def cars(self):
+    def cars(self, archived=False):
         cars, warnings = [], []
         for path in sorted(self.root.glob("*.json")):
             try:
                 car = self.load(path.stem)
-                if car.get("status") == "archived":
+                if (car.get("status") == "archived") != archived:
                     continue  # Hidden from the garage, never deleted from disk.
                 car["file_path"] = str(path)
                 cars.append(car)
@@ -484,6 +538,7 @@ def prepare_car(store, window, process_api):
         "schema_version": 1, "id": str(uuid.uuid4()), "created_at": now(),
         "status": "saved_open", "source_window_id": window["id"], "window_title": window["title"],
         "source_session_ids": [t["terminal_id"] for t in window["tabs"]],
+        "window_bounds": window.get("bounds"),
         "tabs": window["tabs"], "tracked_processes": merge_processes(descendants(roots, process_api.all()), helpers),
         "restored_targets": {}, "pending_tab": None,
         "note": "Recovery file saved. The original window may still be open.",
@@ -520,8 +575,9 @@ def close_saved_car(store, iterm, process_api, car):
         after_interrupt = {s["id"] for w in iterm.windows() for t in w["tabs"] for s in t["sessions"]}
         if source_ids & after_interrupt:
             iterm.call("close", **args)  # Adapter rechecks the full ordered list.
-        # Cancellation means no further termination, even if an agent exited
-        # from SIGINT. Do not change or bypass the user's iTerm confirmations.
+        # Cancellation on the normal AppleScript fallback means no further
+        # termination. The optional API skips only this saved window's prompt;
+        # neither path changes the user's ordinary confirmation preferences.
         source_ids = set(car["source_session_ids"])
         remaining_ids = {s["id"] for w in iterm.windows() for t in w["tabs"] for s in t["sessions"]}
         if source_ids & remaining_ids:
@@ -545,7 +601,7 @@ def close_saved_car(store, iterm, process_api, car):
             car["status"] = "attention" if alive else "parked"
             car["note"] = ("Saved and closed, but some tracked processes are still running: "
                            + ", ".join(str(p["pid"]) for p in alive) + ". Restore is blocked until they stop."
-                           if alive else "Parked. Use Reopen my windows to return.")
+                           if alive else "Parked. Click the car to reopen this window.")
     except Exception as error:
         car["status"] = "attention"
         car["note"] = "Recovery file kept. Parking did not finish: " + str(error)
@@ -618,7 +674,8 @@ def restore(store, iterm, process_api, car_id):
                     or (window_id, tab["terminal_id"]) not in present):
                 raise ParkError("An open conversation could not be verified in its saved folder. Nothing was duplicated; the car has been kept.")
             match = {"window_id": window_id, "terminal_id": tab["terminal_id"]}
-        if recorded and recorded["terminal_id"] in open_ids and recorded != match:
+        if (recorded and recorded["terminal_id"] in open_ids
+                and {k: recorded[k] for k in ("window_id", "terminal_id")} != match):
             raise ParkError("A returned tab is still open, but its saved conversation is not identifiable there. Check that tab before retrying. The car has been kept.")
         if match:
             matches[str(index)] = match
@@ -637,7 +694,9 @@ def restore(store, iterm, process_api, car_id):
                        for w in live for t in w["tabs"]):
         raise ParkError("An open agent of the same type could not be identified. Let its session record appear, then retry. Nothing was duplicated.")
 
-    targets.update(matches)
+    for index, match in matches.items():
+        old = targets.get(index, {})
+        targets[index] = {**old, **match} if all(old.get(k) == v for k, v in match.items()) else match
     car["pending_tab"] = None
     window_id = next((target["window_id"] for target in matches.values()), None)
     opened = 0
@@ -655,23 +714,42 @@ def restore(store, iterm, process_api, car_id):
             car["note"] = "Restore stopped; earlier tabs may be open. " + str(error)
             store.save(car)
             raise ParkError(car["note"])
+        if window_id is None:
+            car["created_window_id"] = created["windowId"]
+            car["bounds_pending"] = car.get("window_bounds") is not None
         window_id = created["windowId"]
-        targets[str(index)] = {"window_id": window_id, "terminal_id": created["sessionId"]}
+        targets[str(index)] = {"window_id": window_id, "terminal_id": created["sessionId"], "title_pending": True}
         car["pending_tab"] = None
         opened += 1
         store.save(car)
 
     # Already-open conversations are brought forward, not duplicated. Select
     # the exact windows, verifying their recorded tab IDs again in the adapter.
-    # Fresh launches still need agent-identity checks when Remove car is clicked.
+    # Created identities are journaled before title/frame writes. Presentation
+    # retries never launch another tab or retitle an unrelated existing session.
     by_window = {}
     for index in range(len(car["tabs"])):
         target = targets[str(index)]
         by_window.setdefault(target["window_id"], []).append(target["terminal_id"])
+    for index, tab in enumerate(car["tabs"]):
+        target = targets[str(index)]
+        if target.get("title_pending"):
+            iterm.call("set-title", windowId=target["window_id"], sessionId=target["terminal_id"], title=tab["title"])
+            target["title_pending"] = False
+            store.save(car)
+    if car.get("bounds_pending"):
+        created_window = car["created_window_id"]
+        if created_window not in by_window:
+            raise ParkError("The newly restored window moved or closed. The car has been kept.")
+        result = iterm.call("set-bounds", windowId=created_window,
+                            sessionIds=by_window[created_window], bounds=car["window_bounds"])
+        car["restored_bounds"] = result.get("bounds")
+        car["bounds_pending"] = False
+        store.save(car)
     for window_id, terminal_ids in reversed(list(by_window.items())):
         iterm.call("focus", windowId=window_id, sessionIds=terminal_ids)
     car["status"] = "restored"
-    car["note"] = ("Requested " + str(opened) + " tabs. Check your conversations, then choose Remove car."
+    car["note"] = ("Opened " + str(opened) + " tabs. Waiting to identify every saved conversation."
                    if opened else "Your conversations are already open. Their windows were brought forward.")
     store.save(car)
     return car["note"]
@@ -683,7 +761,8 @@ def verify_return(car, iterm, process_api):
     A terminal alone is not proof: match this car's exact window/tab, provider,
     session, cwd and process identity. This is a point-in-time check.
     """
-    if car["status"] != "restored" or car.get("pending_tab") is not None or not car["tabs"]:
+    if (car["status"] != "restored" or car.get("pending_tab") is not None or not car["tabs"]
+            or car.get("bounds_pending") or any(t.get("title_pending") for t in car["restored_targets"].values())):
         raise ReturnNotVerified("This car has not finished opening. It has been kept.")
     live = discover(iterm, process_api)
     roots, expected = [], []
@@ -703,17 +782,68 @@ def verify_return(car, iterm, process_api):
                 or (saved["provider"] != "shell" and tab["session_id"] != saved["session_id"])):
             raise ReturnNotVerified("A saved conversation is not identifiable in its restored tab yet. Let it finish opening, check the conversation, then try again. The car has been kept.")
         used.add(identity)
+        if saved["provider"] != "shell":
+            copies = [t for w in live for t in w["tabs"]
+                      if (t["provider"], t["session_id"]) == (saved["provider"], saved["session_id"])]
+            if len(copies) != 1:
+                raise ReturnNotVerified("This conversation is open more than once. The car has been kept.")
         expected.append(identity)
         roots.append(tab["process"])
 
     # Recheck tab presence and process birth identities immediately before the
     # archive write. Unknown, switched or exited sessions fail closed.
-    present = {(w["id"], s["id"]) for w in iterm.windows()
-               for t in w["tabs"] for s in t["sessions"]}
+    raw = iterm.windows()
+    present = {(w["id"], s["id"]) for w in raw for t in w["tabs"] for s in t["sessions"]}
     current = process_api.all()
     if not set(expected).issubset(present) or not all(
             same_process(p, current.get(p["pid"])) for p in roots):
         raise ReturnNotVerified("A restored session closed or changed during the check. The car has been kept.")
+    window_ids = {w for w, _ in expected}
+    window = next((w for w in raw if w["id"] in window_ids), None)
+    if (len(window_ids) != 1 or window is None
+            or [t["sessions"][0]["id"] for t in window["tabs"] if len(t["sessions"]) == 1]
+            != [sid for _, sid in expected]
+            or len(window["tabs"]) != len(expected)):
+        raise ReturnNotVerified("The returned window no longer has the exact saved tab order and grouping. The car has been kept.")
+
+
+def archive_verified_returns(store, iterm, process_api, car_ids=None, attempts=1):
+    """Only successful identity checks retire a car. Launch success is not proof."""
+    cars, _ = store.cars()
+    pending = [car for car in cars if car["status"] == "restored"
+               and (car_ids is None or car["id"] in car_ids)]
+    archived = []
+    for attempt in range(attempts):
+        for car in list(pending):
+            try:
+                verify_return(car, iterm, process_api)
+            except ReturnNotVerified:
+                continue
+            archive_car(store, car, verified=True)
+            archived.append(car["id"])
+            pending.remove(car)
+        if not pending:
+            break
+        if attempt + 1 < attempts:
+            time.sleep(1)
+    return archived
+
+
+def open_car(store, iterm, process_api, car_id):
+    restore(store, iterm, process_api, car_id)
+    archived = archive_verified_returns(store, iterm, process_api, {car_id}, attempts=6)
+    return {"verified_archived_ids": archived,
+            "message": "" if archived else "Window opened; the car stays until every saved tab is identified."}
+
+
+def unarchive_car(store, car_id):
+    car = store.load(car_id)
+    if car["status"] != "archived":
+        raise ParkError("This car is already in the car park.")
+    car["status"] = "parked"
+    car["note"] = "Recovered from the archive. Click the car to reopen or find its existing tabs."
+    store.save(car)
+    return ""
 
 
 def restore_all(store, iterm, process_api):
@@ -774,16 +904,21 @@ def main(argv):
             pass  # App launch is disk-only. No terminal permissions prompt.
         elif action == "scan":
             response["windows"] = discover(iterm, process_api)
-        elif action in ("park-all", "restore-all", "park", "restore", "confirm-return", "remove", "remove-confirmed"):
+            with store.lock():
+                response["verified_archived_ids"] = archive_verified_returns(store, iterm, process_api)
+        elif action in ("park-all", "restore-all", "park", "restore", "confirm-return", "remove", "remove-confirmed", "unarchive"):
             with store.lock():
                 if action == "park-all" and len(argv) == 1:
                     response["message"] = park_all(store, iterm, process_api)
                 elif action == "restore-all" and len(argv) == 1:
                     response["message"] = restore_all(store, iterm, process_api)
+                    response["verified_archived_ids"] = archive_verified_returns(store, iterm, process_api, attempts=6)
                 elif action == "park" and len(argv) == 3:
                     response["message"] = park(store, iterm, process_api, argv[1], argv[2])
                 elif action == "restore" and len(argv) == 2:
-                    response["message"] = restore(store, iterm, process_api, argv[1])
+                    response.update(open_car(store, iterm, process_api, argv[1]))
+                elif action == "unarchive" and len(argv) == 2:
+                    response["message"] = unarchive_car(store, argv[1])
                 elif action == "confirm-return" and len(argv) == 2:
                     response["message"] = confirm_return(store, iterm, process_api, argv[1])
                 elif action == "remove" and len(argv) == 2:
@@ -799,6 +934,7 @@ def main(argv):
         if isinstance(error, AutomationPermissionError):
             response["error_code"] = "automation_denied"
     response["cars"], response["warnings"] = store.cars()
+    response["archives"], _ = store.cars(archived=True)
     print(json.dumps(response))
 
 

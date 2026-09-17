@@ -32,10 +32,36 @@ function run(argv) {
         return session.name();
     }
 
+    function validBounds(b) {
+        return b && ['x', 'y', 'width', 'height'].every(k => typeof b[k] === 'number' && Number.isFinite(b[k])) &&
+            b.width > 0 && b.height > 0;
+    }
+    function visibleBounds(saved) {
+        if (!validBounds(saved)) throw new Error('Invalid saved window size. The car has been kept.');
+        ObjC.import('AppKit');
+        const screens = $.NSScreen.screens;
+        const top = screens.objectAtIndex(0).frame.origin.y + screens.objectAtIndex(0).frame.size.height;
+        const frames = [];
+        for (let i = 0; i < screens.count; i++) {
+            const f = screens.objectAtIndex(i).visibleFrame;
+            frames.push({x: f.origin.x, y: top - f.origin.y - f.size.height,
+                         width: f.size.width, height: f.size.height});
+        }
+        // Keep the exact frame when it still fits. After a display disconnect,
+        // use the closest available screen rather than strand a window offscreen.
+        const overlap = f => Math.max(0, Math.min(saved.x + saved.width, f.x + f.width) - Math.max(saved.x, f.x)) *
+                             Math.max(0, Math.min(saved.y + saved.height, f.y + f.height) - Math.max(saved.y, f.y));
+        const screen = frames.sort((a, b) => overlap(b) - overlap(a))[0];
+        const width = Math.min(saved.width, screen.width), height = Math.min(saved.height, screen.height);
+        return {x: Math.max(screen.x, Math.min(saved.x, screen.x + screen.width - width)),
+                y: Math.max(screen.y, Math.min(saved.y, screen.y + screen.height - height)), width, height};
+    }
+
     if (request.action === 'list') {
         return JSON.stringify(windows().map(w => ({
             id: String(w.id()),
             title: w.name(),
+            bounds: w.bounds(),
             tabs: w.tabs().map((t, index) => ({
                 index: index,
                 sessions: t.sessions().map(s => ({id: s.id(), tty: s.tty(), title: tabTitle(t, s)}))
@@ -45,6 +71,26 @@ function run(argv) {
     if (request.action === 'check') {
         checkedWindow();
         return JSON.stringify({ok: true});
+    }
+    if (request.action === 'set-title') {
+        const w = getWindow(request.windowId);
+        const tabs = w.tabs().filter(t => t.sessions().length === 1 && t.sessions()[0].id() === request.sessionId);
+        if (tabs.length !== 1 || typeof request.title !== 'string') {
+            throw new Error('The restored tab changed. Its title was not altered.');
+        }
+        // Assign the tab title, not the session name or terminal input. This
+        // preserves Unicode/custom titles and never participates in broadcasting.
+        try { tabs[0].title = request.title; }
+        catch (_) { tabs[0].sessions()[0].name = request.title; }
+        if (tabTitle(tabs[0], tabs[0].sessions()[0]) !== request.title) {
+            throw new Error('iTerm could not restore the saved title. Enable its Python API and install its Python runtime (Scripts menu), then retry. The car is kept.');
+        }
+        return JSON.stringify({ok: true});
+    }
+    if (request.action === 'set-bounds') {
+        const w = checkedWindow();
+        w.bounds = visibleBounds(request.bounds);
+        return JSON.stringify({ok: true, bounds: w.bounds()});
     }
     if (request.action === 'close') {
         const w = checkedWindow();

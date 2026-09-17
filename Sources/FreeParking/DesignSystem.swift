@@ -113,21 +113,33 @@ struct PaintedParkingSpace: View {
         Canvas { context, size in
             let left = size.width * 0.12
             let right = size.width * 0.88
-            let top = size.height * 0.10
-            let bottom = size.height * 0.94
+            let top = size.height * 0.07
+            let bottom = size.height * 0.93
             var lines = Path()
             lines.move(to: CGPoint(x: left, y: bottom))
             lines.addLine(to: CGPoint(x: left + 4, y: top))
             lines.addLine(to: CGPoint(x: right - 4, y: top + 1))
             lines.addLine(to: CGPoint(x: right, y: bottom))
             let paint = Color(red: 0.89, green: 0.88, blue: 0.75)
-            let thickness: CGFloat = compact ? 5 : 7
+            let thickness = max(3, min(size.width, size.height) * 0.042)
             context.drawLayer { paintLayer in
                 paintLayer.stroke(lines, with: .color(paint.opacity(0.62)),
                                style: StrokeStyle(lineWidth: thickness, lineCap: .square, lineJoin: .miter))
-                paintLayer.draw(Text("P").font(ParkingStyle.signFont(compact ? 51 : 82))
-                    .foregroundColor(paint.opacity(0.57)),
-                    at: CGPoint(x: size.width / 2, y: size.height * 0.50))
+                // A road-marking glyph with explicit bounds avoids font baseline
+                // offsets at different bay sizes. Center its painted shape, not
+                // an oversized line box whose top can overlap the parking line.
+                let glyph = CGRect(x: size.width * 0.355, y: size.height * 0.29,
+                                   width: size.width * 0.29, height: size.height * 0.45)
+                var p = Path()
+                p.move(to: CGPoint(x: glyph.minX, y: glyph.maxY))
+                p.addLine(to: CGPoint(x: glyph.minX, y: glyph.minY))
+                p.addLine(to: CGPoint(x: glyph.midX, y: glyph.minY))
+                p.addCurve(to: CGPoint(x: glyph.midX, y: glyph.minY + glyph.height * 0.55),
+                           control1: CGPoint(x: glyph.maxX + glyph.width * 0.2, y: glyph.minY),
+                           control2: CGPoint(x: glyph.maxX + glyph.width * 0.2, y: glyph.minY + glyph.height * 0.55))
+                p.addLine(to: CGPoint(x: glyph.minX, y: glyph.minY + glyph.height * 0.55))
+                paintLayer.stroke(p, with: .color(paint.opacity(0.65)),
+                                  style: StrokeStyle(lineWidth: thickness * 1.8, lineCap: .butt, lineJoin: .miter))
                 paintLayer.blendMode = .destinationOut
                 // Thin breaks and chipped grain expose the road beneath the paint.
                 for i in 0..<750 {

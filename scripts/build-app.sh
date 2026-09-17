@@ -24,10 +24,10 @@ if [[ "$NAME" == "Free Parking Preview" ]]; then
     /usr/libexec/PlistBuddy -c 'Set :CFBundleDisplayName Free Parking Preview' "$APP/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c 'Delete :NSAppleEventsUsageDescription' "$APP/Contents/Info.plist"
     # No terminal-control resources or Automation entitlement in this app.
-    rm -f "$APP/Contents/Resources/freeparking.py" "$APP/Contents/Resources/iterm.js"
+    rm -f "$APP/Contents/Resources/freeparking.py" "$APP/Contents/Resources/iterm.js" "$APP/Contents/Resources/iterm_api.py"
     codesign --force --sign - "$APP"
 else
-    cp Resources/freeparking.py Resources/iterm.js "$APP/Contents/Resources/"
+    cp Resources/freeparking.py Resources/iterm.js Resources/iterm_api.py "$APP/Contents/Resources/"
     codesign --force --sign - --entitlements Resources/FreeParking.entitlements "$APP"
 fi
 printf '\nBuilt (not launched): %s\n' "$APP"

@@ -46,7 +46,7 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
     var statusLabel: String {
         switch status {
         case "parked": return "Parked"
-        case "restored": return "Opened"
+        case "restored": return "Awaiting verification"
         case "saved_open": return "Saved · still open"
         case "restoring": return "Restore interrupted"
         default: return "Needs attention"
@@ -77,6 +77,8 @@ struct BackendResponse: Decodable, Sendable {
     let error: String?
     let errorCode: String?
     let confirmationRequired: RemovalRequest?
+    let archives: [ParkedCar]?
+    let verifiedArchivedIds: [String]?
 }
 
 enum LocalBackend {
@@ -89,7 +91,7 @@ enum LocalBackend {
         }
         // Ask in the app's own identity before a timed helper call. The first
         // macOS consent dialog may stay open longer than a discovery timeout.
-        if arguments.first != "list" && arguments.first != "remove-confirmed",
+        if !["list", "remove-confirmed", "unarchive"].contains(arguments.first ?? ""),
            !NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty {
             let target = NSAppleEventDescriptor(bundleIdentifier: "com.googlecode.iterm2")
             let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, true)
@@ -144,6 +146,15 @@ final class Garage: ObservableObject {
     let isPreview = PreviewMode.enabled
     private var previewLoaded = false
     @Published var cars: [ParkedCar] = []
+    @Published var archives: [ParkedCar] = []
+    @Published var showingArchive = false
+    @Published var arrivingAt: [String: Date] = [:]
+    @Published var departingAt: [String: Date] = [:]
+    @Published private var departingCars: [ParkedCar] = []
+    var displayedCars: [ParkedCar] {
+        (cars + departingCars.filter { old in !cars.contains { $0.id == old.id } })
+            .sorted { $0.createdAt > $1.createdAt }
+    }
     @Published var windows: [LiveWindow] = []
     @Published var busy = false
     @Published var activity = ""
@@ -195,22 +206,16 @@ final class Garage: ObservableObject {
                 return
             }
             for window in targets {
-                cars.insert(PreviewFixtures.car(id: UUID().uuidString, date: ISO8601DateFormatter().string(from: .now),
-                                                count: window.tabs.count, title: window.title), at: 0)
+                let car = PreviewFixtures.car(id: UUID().uuidString, date: ISO8601DateFormatter().string(from: .now),
+                                              count: window.tabs.count, title: window.title)
+                arrivingAt[car.id] = .now
+                cars.insert(car, at: 0)
             }
             windows = []
             hasScanned = false
             return
         }
         perform(["park-all"], activity: "Saving all windows, then closing. Confirm in iTerm if asked…")
-    }
-    func reopenAll() {
-        guard !busy, pendingRemoval == nil, !cars.isEmpty else { return }
-        if isPreview {
-            cars = cars.map { $0.withStatus("restored", note: "Fictional return. No terminals were opened.") }
-            return
-        }
-        perform(["restore-all"], activity: "Reopening your windows…")
     }
     func park(_ window: LiveWindow) {
         guard !busy, pendingRemoval == nil else { return }
@@ -230,15 +235,15 @@ final class Garage: ObservableObject {
     /// Opening a car resumes its saved conversations or focuses them.
     /// It never navigates to an inspection or confirmation screen.
     func open(_ car: ParkedCar) {
-        guard !busy, pendingRemoval == nil else { return }
+        guard !busy, pendingRemoval == nil, cars.contains(where: { $0.id == car.id }) else { return }
         selectedCar = nil
         recoveryCar = nil
         carIssues[car.id] = nil
         message = ""
         if isPreview {
-            if let index = cars.firstIndex(where: { $0.id == car.id }) {
+            if previewUnverifiedIDs.contains(car.id), let index = cars.firstIndex(where: { $0.id == car.id }) {
                 cars[index] = car.withStatus("restored", note: "Fictional return. No terminals were opened.")
-            }
+            } else { removePreviewCar(car.id, driveAway: true) }
             return
         }
         perform(["restore", car.id], activity: "Opening in iTerm…", carID: car.id)
@@ -266,11 +271,46 @@ final class Garage: ObservableObject {
         perform(["remove-confirmed", request.carId, request.token], activity: "Keeping recovery and removing car…", carID: request.carId)
     }
 
-    private func removePreviewCar(_ id: String) {
-        withAnimation(.easeInOut(duration: 0.3)) { cars.removeAll { $0.id == id } }
+    private func removePreviewCar(_ id: String, driveAway: Bool = false) {
+        guard let car = cars.first(where: { $0.id == id }) else { return }
+        archives.removeAll { $0.id == id }
+        archives.insert(car.withStatus("archived", note: "Fictional recovery backup."), at: 0)
+        if driveAway { depart([car]) }
+        cars.removeAll { $0.id == id }
         carIssues[id] = nil
         previewUnverifiedIDs.remove(id)
         message = ""
+    }
+
+    private func depart(_ cars: [ParkedCar]) {
+        guard !cars.isEmpty else { return }
+        let started = Date()
+        for car in cars {
+            departingCars.removeAll { $0.id == car.id }
+            departingCars.append(car)
+            departingAt[car.id] = started
+        }
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1800))
+            let ids = Set(cars.map(\.id).filter { departingAt[$0] == started })
+            departingCars.removeAll { ids.contains($0.id) }
+            for id in ids { departingAt[id] = nil; arrivingAt[id] = nil }
+        }
+    }
+
+    func bringBack(_ car: ParkedCar) {
+        guard !busy, pendingRemoval == nil else { return }
+        showingArchive = false
+        if isPreview {
+            archives.removeAll { $0.id == car.id }
+            departingCars.removeAll { $0.id == car.id }
+            departingAt[car.id] = nil
+            if !cars.contains(where: { $0.id == car.id }) {
+                cars.insert(car.withStatus("parked", note: "Recovered from the archive."), at: 0)
+            }
+            return
+        }
+        perform(["unarchive", car.id], activity: "Bringing back your car…")
     }
 
     func openAutomationSettings() {
@@ -295,16 +335,24 @@ final class Garage: ObservableObject {
                 let response = try await Task.detached(priority: .userInitiated) {
                     try LocalBackend.call(arguments)
                 }.value
-                withAnimation(.easeInOut(duration: 0.35)) {
-                    cars = response.cars
-                    if arguments.first == "scan" {
-                        windows = response.windows
-                        hasScanned = response.ok
-                    } else if arguments.first != "list" {
-                        // Do not show stale live-window buttons after a mutation.
-                        windows = []
-                        hasScanned = false
+                let previous = cars
+                let verifiedIDs = Set(response.verifiedArchivedIds ?? [])
+                depart(previous.filter { old in verifiedIDs.contains(old.id) && !response.cars.contains(where: { $0.id == old.id }) })
+                if ["park", "park-all"].contains(arguments.first ?? "") {
+                    let oldIDs = Set(previous.map(\.id))
+                    for car in response.cars where !oldIDs.contains(car.id) && car.status == "parked" {
+                        arrivingAt[car.id] = .now
                     }
+                }
+                cars = response.cars
+                archives = response.archives ?? []
+                if arguments.first == "scan" {
+                    windows = response.windows
+                    hasScanned = response.ok
+                } else if arguments.first != "list" {
+                    // Do not show stale live-window buttons after a mutation.
+                    windows = []
+                    hasScanned = false
                 }
                 if carID == nil { message = response.message ?? "" }
                 if !response.ok { failure = response.error ?? "The operation did not finish." }
@@ -368,7 +416,10 @@ final class Garage: ObservableObject {
         case "parked", "details", "options":
             cars = [sample]
         case "multiple":
-            cars = [sample.withStatus("restored", note: "Fictional live match."), PreviewFixtures.cars[1]]
+            cars = [sample, PreviewFixtures.cars[1]]
+        case "archive":
+            archives = PreviewFixtures.cars.map { $0.withStatus("archived", note: "Verified return. Recovery retained.") }
+            showingArchive = true
         case "remove-confirm":
             cars = [sample.withStatus("restored", note: "Fictional previously opened window."), PreviewFixtures.cars[1]]
             previewUnverifiedIDs.insert(sample.id)
@@ -389,6 +440,7 @@ final class Garage: ObservableObject {
             activity = "Opening in iTerm…"
         case "returned":
             cars = [sample.withStatus("restored", note: "Sample conversations opened.")]
+            previewUnverifiedIDs.insert(sample.id)
         case "remove-blocked":
             cars = [sample.withStatus("restored", note: "Sample conversations opened.")]
             carIssues[sample.id] = CarIssue(summary: "Car kept · tab not verified",

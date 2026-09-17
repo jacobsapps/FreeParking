@@ -62,7 +62,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // running app. ImageRenderer does not record the desktop.
                 if let garage {
                     let content: AnyView
-                    if PreviewMode.scene == "remove-confirm", let request = garage.pendingRemoval {
+                    if PreviewMode.scene == "archive" {
+                        content = AnyView(ArchiveView(exporting: true).environmentObject(garage))
+                    } else if PreviewMode.scene == "remove-confirm", let request = garage.pendingRemoval {
                         content = AnyView(RemovalConfirmation(request: request).environmentObject(garage))
                     } else if PreviewMode.scene == "details", let car = garage.cars.first {
                         content = AnyView(CarDetails(car: car, exporting: true).environmentObject(garage)
@@ -102,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 garage?.selectedCar = nil
                 garage?.recoveryCar = nil
                 garage?.selectedWindow = nil
+                garage?.showingArchive = false
                 try? await Task.sleep(for: .milliseconds(400))
                 NSApp.terminate(nil) // This preview process only; never iTerm.
             }
@@ -113,7 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Do not abandon an in-flight save/close or create a restore ambiguity.
         let alert = NSAlert()
         alert.messageText = "Free Parking is still working"
-        alert.informativeText = "Finish or cancel the iTerm close confirmation, then quit Free Parking. Your recovery file is kept."
+        alert.informativeText = "Wait for the current operation to finish. If iTerm shows a close confirmation, finish or cancel it first. Your recovery file is kept."
         alert.addButton(withTitle: "Keep Free Parking Open")
         alert.runModal()
         return .terminateCancel

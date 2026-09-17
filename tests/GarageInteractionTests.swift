@@ -32,8 +32,11 @@ struct GarageInteractionTests {
 
         garage.cars = [a, b]
         garage.open(b)
-        precondition(garage.cars.count == 2)
-        precondition(garage.cars.first { $0.id == b.id }!.hasReturned)
+        precondition(garage.cars.map(\.id) == [a.id])
+        precondition(garage.archives.contains { $0.id == b.id })
+        precondition(garage.departingAt[b.id] != nil)
+        garage.bringBack(b)
+        precondition(Set(garage.cars.map(\.id)) == Set([a.id, b.id]))
         precondition(garage.selectedCar == nil && garage.recoveryCar == nil)
 
         garage.scan()
@@ -51,8 +54,8 @@ struct GarageInteractionTests {
         precondition(direct.cars.count == 1 && direct.selectedWindow == nil)
         direct.parkAll()
         precondition(direct.cars.count == 2)
-        direct.reopenAll()
-        precondition(direct.cars.allSatisfy(\.hasReturned))
+        for car in direct.cars { direct.open(car) }
+        precondition(direct.cars.isEmpty && direct.archives.count == 2)
         direct.windows = [PreviewFixtures.window, PreviewFixtures.unsupportedWindow]
         let before = direct.cars.count
         direct.parkAll()

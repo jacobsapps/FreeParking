@@ -144,7 +144,8 @@ class ParkingAllTests(unittest.TestCase):
         self.iterm.raw=[{'id':'9','tabs':[{'sessions':[{'id':'returned-shell'},{'id':'other-shell'}]}]}]
         self.running[101] = tab['process']
         with patch.object(fp,'discover',return_value=live):
-            fp.verify_return(car,self.iterm,self.proc)
+            with self.assertRaisesRegex(fp.ReturnNotVerified, "tab order and grouping"):
+                fp.verify_return(car,self.iterm,self.proc)
             # No new tab should be requested on a repeat reopen.
             with patch.object(self.iterm,'call',return_value={'ok':True}) as call:
                 fp.restore(self.store,self.iterm,self.proc,car['id'])
