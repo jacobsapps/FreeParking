@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>FreeParking</string>
+    <key>CFBundleIdentifier</key><string>com.jacobsapps.FreeParking</string>
+    <key>CFBundleName</key><string>Free Parking</string>
+    <key>CFBundleDisplayName</key><string>Free Parking</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>0.1.0</string>
+    <key>CFBundleVersion</key><string>3</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Free Parking reads your iTerm windows and, only when you park or restore a car, closes or recreates its agent tabs.</string>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+</dict>
+</plist>
