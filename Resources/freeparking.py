@@ -277,6 +277,22 @@ def resolve_tab(tab, processes, process_api, hooks):
     session = tab["sessions"][0]
     result.update(terminal_id=session["id"], tty=session["tty"], title=session["title"])
     try:
+        if not result["has_agent"]:
+            attached = [p for p in processes.values() if p["tty"] == session["tty"]]
+            shells = [p for p in attached if Path(p["executable"]).name.lstrip("-") == "zsh"]
+            other = [p for p in attached if Path(p["executable"]).name.lstrip("-") not in ("zsh", "login", "caffeinate")]
+            if len(shells) != 1 or other:
+                names = sorted({Path(p["executable"]).name for p in other})
+                raise ParkError("This tab is running " + (", ".join(names) or "an unidentified command")
+                                + ". Finish it or close that tab, then park again.")
+            process = shells[0]
+            cwd = process_api.cwd(process["pid"])
+            if not os.path.isabs(cwd) or not Path(cwd).is_dir():
+                raise ParkError("This shell's folder cannot be saved. Close that tab, then park again.")
+            result.update(provider="shell", process=process, cwd=cwd, transcript_path="",
+                          identity_source="idle shell folder",
+                          auxiliary_processes=[p for p in attached if Path(p["executable"]).name == "caffeinate"])
+            return result
         process = top_agent(session["tty"], processes)
         provider = Path(process["executable"]).name
         # Display what we can read even before a resumable session is identified.
@@ -441,12 +457,14 @@ class Store:
 
 def resume_command(tab):
     provider = tab["provider"]
-    if provider not in ("codex", "claude"):
+    if provider not in ("codex", "claude", "shell"):
         raise ParkError("Unknown agent type in recovery file.")
-    sid = session_uuid(tab["session_id"])
     cwd = tab["cwd"]
     if not os.path.isabs(cwd) or "\x00" in cwd:
         raise ParkError("Invalid saved working directory.")
+    if provider == "shell":
+        return "cd " + shlex.quote(cwd) + " && exec /bin/zsh -l"
+    sid = session_uuid(tab["session_id"])
     args = (["codex", "resume", "--sandbox", "danger-full-access", "--ask-for-approval", "never", sid]
             if provider == "codex" else ["claude", "--dangerously-skip-permissions", "--resume", sid])
     return "cd " + shlex.quote(cwd) + " && command " + " ".join(shlex.quote(a) for a in args)
@@ -459,25 +477,27 @@ def launch_command(tab):
     return " ".join(shlex.quote(a) for a in ["/bin/zsh", "-lic", body])
 
 
-def park(store, iterm, process_api, window_id, expected_fingerprint):
-    window = next((w for w in discover(iterm, process_api) if w["id"] == window_id), None)
-    if not window or window["fingerprint"] != expected_fingerprint:
-        raise ParkError("The window or its conversations changed. Refresh before parking.")
-    if not window["can_park"]:
-        raise ParkError("Some tabs cannot be saved. Nothing has been interrupted or closed.")
-    roots = [t["process"] for t in window["tabs"]]
+def prepare_car(store, window, process_api):
+    roots = [t["process"] for t in window["tabs"] if t["provider"] != "shell"]
+    helpers = [p for t in window["tabs"] for p in t.get("auxiliary_processes", [])]
     car = {
         "schema_version": 1, "id": str(uuid.uuid4()), "created_at": now(),
-        "status": "saved_open", "source_window_id": window_id, "window_title": window["title"],
+        "status": "saved_open", "source_window_id": window["id"], "window_title": window["title"],
         "source_session_ids": [t["terminal_id"] for t in window["tabs"]],
-        "tabs": window["tabs"], "tracked_processes": descendants(roots, process_api.all()),
+        "tabs": window["tabs"], "tracked_processes": merge_processes(descendants(roots, process_api.all()), helpers),
         "restored_targets": {}, "pending_tab": None,
         "note": "Recovery file saved. The original window may still be open.",
     }
     for tab in car["tabs"]:
         tab["resume_command"] = resume_command(tab)
     store.save(car)  # Durable recovery MUST succeed before the first interrupt.
-    args = {"windowId": window_id, "sessionIds": car["source_session_ids"]}
+    return car
+
+
+def close_saved_car(store, iterm, process_api, car):
+    roots = [t["process"] for t in car["tabs"]]
+    agent_roots = [t["process"] for t in car["tabs"] if t["provider"] != "shell"]
+    args = {"windowId": car["source_window_id"], "sessionIds": car["source_session_ids"]}
     try:
         # Recheck both the window and process identities before interrupting.
         iterm.call("check", **args)
@@ -487,10 +507,12 @@ def park(store, iterm, process_api, window_id, expected_fingerprint):
         # No synthetic keystrokes: iTerm's AppleScript write command can
         # broadcast input to other windows. Signal only captured process IDs.
         for process in reversed(car["tracked_processes"]):
-            process_api.send_signal(process, signal.SIGINT)
-        time.sleep(1)
+            if Path(process.get("executable", "")).name != "caffeinate":
+                process_api.send_signal(process, signal.SIGINT)
+        if agent_roots:
+            time.sleep(1)
         car["tracked_processes"] = merge_processes(
-            car["tracked_processes"], descendants(roots, process_api.all()))
+            car["tracked_processes"], descendants(agent_roots, process_api.all()))
         store.save(car)
         # SIGINT can make every agent exit, and iTerm may then close the
         # window itself. Do not target its retained Undo-window object.
@@ -509,7 +531,7 @@ def park(store, iterm, process_api, window_id, expected_fingerprint):
             # only the saved agent processes and their observed descendants.
             # Never signal a shell, iTerm itself, a process group, or all agents.
             car["tracked_processes"] = merge_processes(
-                car["tracked_processes"], descendants(roots, process_api.all()))
+                car["tracked_processes"], descendants(agent_roots, process_api.all()))
             store.save(car)
             for process in reversed(car["tracked_processes"]):
                 process_api.send_signal(process, signal.SIGTERM)
@@ -523,12 +545,42 @@ def park(store, iterm, process_api, window_id, expected_fingerprint):
             car["status"] = "attention" if alive else "parked"
             car["note"] = ("Saved and closed, but some tracked processes are still running: "
                            + ", ".join(str(p["pid"]) for p in alive) + ". Restore is blocked until they stop."
-                           if alive else "Parked. Double-click to reopen these conversations.")
+                           if alive else "Parked. Use Reopen my windows to return.")
     except Exception as error:
         car["status"] = "attention"
         car["note"] = "Recovery file kept. Parking did not finish: " + str(error)
     store.save(car)
     return car["note"]
+
+
+def park(store, iterm, process_api, window_id, expected_fingerprint):
+    window = next((w for w in discover(iterm, process_api) if w["id"] == window_id), None)
+    if not window or window["fingerprint"] != expected_fingerprint:
+        raise ParkError("The window or its conversations changed. Refresh before parking.")
+    if not window["can_park"]:
+        raise ParkError("Some tabs cannot be saved. Nothing has been interrupted or closed.")
+    car = prepare_car(store, window, process_api)
+    return close_saved_car(store, iterm, process_api, car)
+
+
+def park_all(store, iterm, process_api):
+    windows = discover(iterm, process_api)
+    if not windows:
+        return "No iTerm windows are open."
+    blocked = [(i + 1, t) for i, w in enumerate(windows) for t in w["tabs"] if t["issue"]]
+    if blocked or any(not w["can_park"] for w in windows):
+        detail = "\n".join("Window " + str(i) + ", tab " + str(t["index"] + 1) + ": " + t["issue"] for i, t in blocked)
+        raise ParkError("Nothing closed. " + (detail or "An empty window could not be saved."))
+    # Save EVERY window before closing ANY window. A failed save touches no terminal.
+    cars = [prepare_car(store, w, process_api) for w in windows]
+    fresh = discover(iterm, process_api)
+    if [(w["id"], w["fingerprint"]) for w in fresh] != [(w["id"], w["fingerprint"]) for w in windows]:
+        raise ParkError("Your tabs changed while saving. Nothing closed; recovery is kept. Click Park my windows again.")
+    for car in cars:
+        close_saved_car(store, iterm, process_api, car)
+        if car["status"] != "parked":
+            return "Parking stopped. " + car["note"] + " Recovery for every window is kept."
+    return ""
 
 
 def restore(store, iterm, process_api, car_id):
@@ -537,7 +589,7 @@ def restore(store, iterm, process_api, car_id):
         resume_command(tab)  # Validate provider, UUID and path before any action.
         if not Path(tab["cwd"]).is_dir():
             raise ParkError("Working directory no longer exists: " + tab["cwd"])
-        if not Path(tab["transcript_path"]).is_file():
+        if tab["provider"] != "shell" and not Path(tab["transcript_path"]).is_file():
             raise ParkError("The saved conversation file is missing: " + tab["transcript_path"])
 
     raw = iterm.windows()
@@ -551,8 +603,11 @@ def restore(store, iterm, process_api, car_id):
     # Resolve all existing conversations before opening anything. An open tab
     # ID is not enough: it may now contain a shell or a different conversation.
     for index, saved in enumerate(car["tabs"]):
+        recorded = targets.get(str(index))
+        shell_ids = {saved["terminal_id"]} | ({recorded["terminal_id"]} if recorded else set())
         candidates = [(w["id"], t) for w in live for t in w["tabs"]
-                      if (t["provider"], t["session_id"]) == (saved["provider"], saved["session_id"])]
+                      if (t["provider"] == "shell" and t["terminal_id"] in shell_ids if saved["provider"] == "shell"
+                          else (t["provider"], t["session_id"]) == (saved["provider"], saved["session_id"]))]
         if len(candidates) > 1:
             raise ParkError("This conversation appears in more than one open tab. Resolve the duplicate in iTerm before retrying. The car has been kept.")
         match = None
@@ -563,7 +618,6 @@ def restore(store, iterm, process_api, car_id):
                     or (window_id, tab["terminal_id"]) not in present):
                 raise ParkError("An open conversation could not be verified in its saved folder. Nothing was duplicated; the car has been kept.")
             match = {"window_id": window_id, "terminal_id": tab["terminal_id"]}
-        recorded = targets.get(str(index))
         if recorded and recorded["terminal_id"] in open_ids and recorded != match:
             raise ParkError("A returned tab is still open, but its saved conversation is not identifiable there. Check that tab before retrying. The car has been kept.")
         if match:
@@ -645,8 +699,8 @@ def verify_return(car, iterm, process_api):
             raise ReturnNotVerified("A restored tab is missing or ambiguous. The car has been kept.")
         tab = matches[0]
         if (tab["issue"] or not tab.get("process")
-                or (tab["provider"], tab["session_id"], tab["cwd"])
-                != (saved["provider"], saved["session_id"], saved["cwd"])):
+                or (tab["provider"], tab["cwd"]) != (saved["provider"], saved["cwd"])
+                or (saved["provider"] != "shell" and tab["session_id"] != saved["session_id"])):
             raise ReturnNotVerified("A saved conversation is not identifiable in its restored tab yet. Let it finish opening, check the conversation, then try again. The car has been kept.")
         used.add(identity)
         expected.append(identity)
@@ -660,6 +714,15 @@ def verify_return(car, iterm, process_api):
     if not set(expected).issubset(present) or not all(
             same_process(p, current.get(p["pid"])) for p in roots):
         raise ReturnNotVerified("A restored session closed or changed during the check. The car has been kept.")
+
+
+def restore_all(store, iterm, process_api):
+    cars, warnings = store.cars()
+    if warnings:
+        raise ParkError("A recovery file needs attention. Nothing was opened. " + " ".join(warnings))
+    for car in sorted(cars, key=lambda c: c["created_at"]):
+        restore(store, iterm, process_api, car["id"])
+    return ""
 
 
 def archive_car(store, car, verified):
@@ -711,9 +774,13 @@ def main(argv):
             pass  # App launch is disk-only. No terminal permissions prompt.
         elif action == "scan":
             response["windows"] = discover(iterm, process_api)
-        elif action in ("park", "restore", "confirm-return", "remove", "remove-confirmed"):
+        elif action in ("park-all", "restore-all", "park", "restore", "confirm-return", "remove", "remove-confirmed"):
             with store.lock():
-                if action == "park" and len(argv) == 3:
+                if action == "park-all" and len(argv) == 1:
+                    response["message"] = park_all(store, iterm, process_api)
+                elif action == "restore-all" and len(argv) == 1:
+                    response["message"] = restore_all(store, iterm, process_api)
+                elif action == "park" and len(argv) == 3:
                     response["message"] = park(store, iterm, process_api, argv[1], argv[2])
                 elif action == "restore" and len(argv) == 2:
                     response["message"] = restore(store, iterm, process_api, argv[1])

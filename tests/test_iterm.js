@@ -18,4 +18,5 @@ assert.throws(()=>call({action:'close',windowId:'1',sessionIds:['wrong-session']
 assert.equal(closed,0);
 call({action:'focus',windowId:'1',sessionIds:['fixture-session']});assert.equal(selected,1);
 call({action:'close',windowId:'1',sessionIds:['fixture-session']});assert.equal(closed,1);
+assert.equal(selected,2); // Bring that exact window's normal confirmation forward.
 console.log('JXA adapter checks passed: retained Undo windows, saved titles, exact-window/session guards.');

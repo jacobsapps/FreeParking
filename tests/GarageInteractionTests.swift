@@ -44,6 +44,24 @@ struct GarageInteractionTests {
         precondition(garage.cars.contains { $0.id == a.id } && garage.cars.contains { $0.id == b.id })
         precondition(garage.windows.isEmpty)
 
+        // The primary actions work without first visiting a scan/review screen.
+        let direct = Garage()
+        direct.load()
+        direct.parkAll()
+        precondition(direct.cars.count == 1 && direct.selectedWindow == nil)
+        direct.parkAll()
+        precondition(direct.cars.count == 2)
+        direct.reopenAll()
+        precondition(direct.cars.allSatisfy(\.hasReturned))
+        direct.windows = [PreviewFixtures.window, PreviewFixtures.unsupportedWindow]
+        let before = direct.cars.count
+        direct.parkAll()
+        precondition(direct.cars.count == before && direct.problem != nil)
+        direct.problem = nil
+        direct.windows = [PreviewFixtures.window, PreviewFixtures.window]
+        direct.parkAll()
+        precondition(direct.cars.count == before + 2 && direct.windows.isEmpty)
+
         do {
             _ = try LocalBackend.call(["scan"])
             preconditionFailure("Preview reached a terminal adapter")

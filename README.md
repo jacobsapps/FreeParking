@@ -3,8 +3,8 @@
 # Free Parking
 
 Put your iTerm2 agent sessions away for the evening. One window becomes one car.
-Double-click it tomorrow to reopen the same Claude and Codex conversations, in
-the same folders and tab order.
+Click **Reopen my windows** tomorrow to bring back your conversations and
+folders, in the same windows and tab order.
 
 **Early personal prototype.** Live tests passed for a two-tab Codex window and
 for Claude Opus through the native app: park → restore → verify → remove.
@@ -55,30 +55,37 @@ helpers or Automation entitlement, and cannot read or close your real tabs.
 
 ## Use it
 
-1. **Park my windows** reads iTerm's windows, tab counts, titles and agent folders.
-   Review the list, then choose **Park** for the window you want to put away.
-2. Recovery is written and read back **before** interrupting any agent or asking
-   iTerm to close that window. Your normal iTerm close confirmation stays on.
-3. **Double-click a car** to reopen its saved conversations, or bring already
-   open, verified conversations forward. This opens terminals, not a details panel.
-4. Check your conversations, then **Remove car**. An exact live match removes
+1. **Park my windows** saves **every open iTerm window**, then closes them.
+   One click—no scan screen, selection step or second Park button. Recovery for
+   **all** windows is written and verified before **any** agent is interrupted
+   or window closes. Your normal iTerm close confirmation stays on.
+2. **Reopen my windows** brings back all saved windows in one click. Already
+   open, verified conversations are brought forward instead of duplicated.
+3. Check your conversations, then **Remove car**. An exact live match removes
    it immediately; otherwise you must explicitly confirm. Recovery files remain
    on disk either way. Removing a car never closes its tabs.
 
-The painted **P** space stays available when cars are parked, so you can park
-another window. Each car is independent. Use **⋯ → Show tabs / Recovery** only
-when you want saved titles, folders or manual recovery commands. Recent cars
-have weekday registration plates; older cars show dates.
+Both main buttons stay visible—there is no scrolling home screen. Larger
+collections of cars use pages. Each car is independent; clicking a car opens
+just that window. **⋯ → Show tabs / Recovery** is there only if you need it.
+Recent cars have weekday registration plates; older cars show dates.
+
+Idle zsh tabs are saved as folders and reopen as shells. A standalone
+`caffeinate` helper does not prevent parking; it is stopped after its window
+closes, not resumed. Shell tabs do not resurrect previously exited agents or
+preserve shell history/scrollback. Other running shell jobs and unidentified
+agents block the operation with the affected window/tab named. Nothing closes
+when this initial check fails.
 
 Closing Free Parking itself does **not** park or close your terminals.
-Cancelling iTerm's close confirmation keeps the car and window, but cannot undo
-an interrupt already sent to an agent.
+Cancelling an iTerm close confirmation stops the remaining parking sequence;
+all recovery files remain. It cannot undo interrupts or closures that already
+happened.
 
 ## Limits worth knowing
 
-- **Local iTerm2 only, one agent per tab.** No split panes, shell-only tabs,
-  tmux or SSH. An unidentified tab blocks parking its whole window rather than
-  guessing which conversation to save.
+- **Local iTerm2 only: one agent or idle zsh per tab.** No split panes,
+  tmux or SSH. Unknown work blocks parking rather than being silently killed.
 - **A saved conversation is required.** Brand-new Codex sessions without a
   saved transcript may not be identifiable. Finish a turn and scan again.
 - **Claude discovery uses local session metadata.** With the tested Claude

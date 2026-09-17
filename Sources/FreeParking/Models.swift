@@ -17,7 +17,7 @@ struct AgentTab: Decodable, Identifiable, Sendable {
     var folder: String { cwd.isEmpty ? "Unidentified tab" : (cwd as NSString).lastPathComponent }
     var displayTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? folder : title }
     var shortPath: String { cwd.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
-    var label: String { provider == "codex" ? "Codex" : provider == "claude" ? "Claude" : "Unknown" }
+    var label: String { provider == "codex" ? "Codex" : provider == "claude" ? "Claude" : provider == "shell" ? "Folder" : "Unknown" }
 }
 
 struct LiveWindow: Decodable, Identifiable, Sendable {
@@ -174,7 +174,7 @@ final class Garage: ObservableObject {
             loadPreview()
             return
         }
-        perform(["list"], activity: "Opening the garage…")
+        perform(["scan"], activity: "Reading iTerm windows…")
     }
     func scan() {
         guard !busy, pendingRemoval == nil else { return }
@@ -184,6 +184,33 @@ final class Garage: ObservableObject {
             return
         }
         perform(["scan"], activity: "Reading iTerm windows…")
+    }
+    func parkAll() {
+        guard !busy, pendingRemoval == nil else { return }
+        selectedWindow = nil
+        if isPreview {
+            let targets = windows.isEmpty ? [PreviewFixtures.window] : windows
+            guard targets.allSatisfy(\.canPark) else {
+                problem = "Nothing closed. Finish the unidentified session, then park again."
+                return
+            }
+            for window in targets {
+                cars.insert(PreviewFixtures.car(id: UUID().uuidString, date: ISO8601DateFormatter().string(from: .now),
+                                                count: window.tabs.count, title: window.title), at: 0)
+            }
+            windows = []
+            hasScanned = false
+            return
+        }
+        perform(["park-all"], activity: "Saving all windows, then closing. Confirm in iTerm if asked…")
+    }
+    func reopenAll() {
+        guard !busy, pendingRemoval == nil, !cars.isEmpty else { return }
+        if isPreview {
+            cars = cars.map { $0.withStatus("restored", note: "Fictional return. No terminals were opened.") }
+            return
+        }
+        perform(["restore-all"], activity: "Reopening your windows…")
     }
     func park(_ window: LiveWindow) {
         guard !busy, pendingRemoval == nil else { return }
@@ -200,7 +227,7 @@ final class Garage: ObservableObject {
         }
         perform(["park", window.id, window.fingerprint], activity: "Saving first, then parking. Check iTerm for its close confirmation…")
     }
-    /// Double-click has one meaning: open the saved conversations or focus them.
+    /// Opening a car resumes its saved conversations or focuses them.
     /// It never navigates to an inspection or confirmation screen.
     func open(_ car: ParkedCar) {
         guard !busy, pendingRemoval == nil else { return }
@@ -368,7 +395,7 @@ final class Garage: ObservableObject {
                                           detail: "One saved conversation is no longer identifiable in its returned tab. Open the car again, check your conversations, then try Remove car. The recovery file is kept.")
         case "partial", "recovery":
             cars = [sample.withStatus("attention", note: "One conversation could not be opened. The car and recovery file are kept.")]
-            carIssues[sample.id] = CarIssue(summary: "1 tab didn’t open", detail: "The Playground folder could not be found. Your other two tabs may already be open. Restore the folder to its saved location, then double-click the car again. The car and recovery file are kept.")
+            carIssues[sample.id] = CarIssue(summary: "1 tab didn’t open", detail: "The Playground folder could not be found. Your other two tabs may already be open. Restore the folder to its saved location, then reopen the car again. The car and recovery file are kept.")
         case "save-error":
             windows = [PreviewFixtures.window]
             problem = "Couldn’t save recovery. Your window was left open."

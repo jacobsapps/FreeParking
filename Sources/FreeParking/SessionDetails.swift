@@ -41,7 +41,7 @@ struct RecoveryDetails: View {
                 Spacer()
                 if garage.isPreview { SampleBadge() }
             }
-            Text(garage.issue(for: car)?.detail ?? "Your saved folders and session IDs are kept in a local recovery file. Double-click the car to open in iTerm.")
+            Text(garage.issue(for: car)?.detail ?? "Your saved folders and session IDs are kept in a local recovery file. Use Reopen my windows to open them in iTerm.")
                 .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Copy resume commands") { garage.copyCommands(car) }

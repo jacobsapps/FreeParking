@@ -48,6 +48,7 @@ function run(argv) {
     }
     if (request.action === 'close') {
         const w = checkedWindow();
+        w.select();
         app.activate();
         // iTerm's window AppleScript handler uses performClose:, preserving its
         // configured confirmation. No force flag, preferences, or quit command.
