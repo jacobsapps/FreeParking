@@ -33,13 +33,20 @@ You need:
 ```sh
 git clone https://github.com/jacobsapps/FreeParking.git
 cd FreeParking
-bash scripts/build-app.sh
-open "dist/Free Parking.app"
+bash scripts/build-app.sh --install
+open "/Applications/Free Parking.app"
 ```
 
 The build creates a locally signed app; it does not launch it or touch iTerm.
-You can drag **Free Parking.app** from `dist` into Applications and open it like
-any other app. This is a source build, not a notarized downloadable release.
+`--install` puts it at **/Applications/Free Parking.app** and replaces that same
+copy on future installs, so your Dock shortcut stays current. Quit Free Parking
+before updating; your iTerm windows can stay open. After pulling updates, rerun
+`bash scripts/build-app.sh --install`.
+
+To keep it in the Dock, open the installed app, then right-click its Dock icon
+and choose **Options → Keep in Dock**. Without `--install`, the script only
+builds into `dist`; if Applications is not writable, copy that build there using
+Finder instead. This is a source build, not a notarized downloadable release.
 
 When prompted, **allow Free Parking to control iTerm**. Reading windows uses
 macOS **Automation**, not Accessibility or screen capture. It does not click
