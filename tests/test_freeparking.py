@@ -62,6 +62,8 @@ class FakeITerm:
             self.raw = [{"id": "2", "title": "Fixture", "tabs": [{"index": 0, "sessions": [
                 {"id": "restored-fixture", "tty": "/dev/fixture", "title": "Fixture"}]}]}]
             return {"windowId": "2", "sessionId": "restored-fixture"}
+        if action == "set-bounds":
+            return {"ok": True, "bounds": kwargs["bounds"]}
         if action == "focus":
             present = {s["id"] for w in self.raw if w["id"] == kwargs["windowId"]
                        for t in w["tabs"] for s in t["sessions"]}
@@ -201,55 +203,43 @@ class CarParkTests(unittest.TestCase):
         self.store.save(other)
         return other
 
-    def test_remove_exact_match_needs_no_confirmation_and_affects_only_that_car(self):
-        car, window = self.awaiting_confirmation()
-        other = self.second_car(car)
-        other_bytes = self.store.path(other["id"]).read_bytes()
-        with patch.object(cp, "discover", return_value=[window]):
-            response = cp.remove_car(self.store, self.iterm, self.proc, car["id"])
-        self.assertNotIn("confirmation_required", response)
-        self.assertEqual(self.store.load(car["id"])["status"], "archived")
-        self.assertEqual(self.store.path(other["id"]).read_bytes(), other_bytes)
-        self.assertTrue(self.store.path(car["id"]).is_file())
-
-    def test_missing_iterm_tabs_require_confirmation_without_writing(self):
-        car, _ = self.awaiting_confirmation()
-        self.iterm.raw = []
-        before = self.store.path(car["id"]).read_bytes()
-        with patch.object(cp, "discover", return_value=[]):
-            response = cp.remove_car(self.store, self.iterm, self.proc, car["id"])
-        request = response["confirmation_required"]
-        self.assertEqual(request["car_id"], car["id"])
-        self.assertEqual(self.store.path(car["id"]).read_bytes(), before)
-        signals = list(self.proc.signals)
-        calls = list(self.iterm.calls)
-        cp.remove_car(self.store, self.iterm, self.proc, car["id"], request["token"])
-        self.assertEqual(self.store.load(car["id"])["removal_basis"], "explicit_unverified_confirmation")
-        self.assertTrue(self.store.path(car["id"]).is_file())
-        self.assertEqual(self.proc.signals, signals)
-        self.assertEqual(self.iterm.calls, calls)
-
-    def test_confirmation_cannot_be_applied_to_another_car_or_changed_revision(self):
+    def test_manual_archive_is_immediate_and_affects_only_that_car(self):
         car = self.parked_car()
         other = self.second_car(car)
-        response = cp.remove_car(self.store, self.iterm, self.proc, car["id"])
-        token = response["confirmation_required"]["token"]
-        with self.assertRaisesRegex(cp.ParkError, "changed"):
-            cp.remove_car(self.store, self.iterm, self.proc, other["id"], token)
-        changed = self.store.load(car["id"])
-        changed["note"] = "A later operation changed this car"
-        self.store.save(changed)
-        with self.assertRaisesRegex(cp.ParkError, "changed"):
-            cp.remove_car(self.store, self.iterm, self.proc, car["id"], token)
+        other_bytes = self.store.path(other["id"]).read_bytes()
+        response = cp.remove_car(self.store, car["id"])
+        self.assertEqual(response, {"message": ""})
+        self.assertEqual(self.store.load(car["id"])["status"], "archived")
+        self.assertEqual(self.store.path(other["id"]).read_bytes(), other_bytes)
+        self.assertEqual(self.store.load(car["id"])["tabs"], car["tabs"])
+        cp.unarchive_car(self.store, car["id"])
         self.assertEqual(len(self.store.cars()[0]), 2)
 
-    def test_permission_denial_is_not_treated_as_a_missing_window(self):
-        car, _ = self.awaiting_confirmation()
+    def test_manual_archive_never_inspects_or_changes_terminals(self):
+        car = self.parked_car()
+        signals, calls = list(self.proc.signals), list(self.iterm.calls)
+        with patch.object(cp, "discover", side_effect=cp.AutomationPermissionError("Access denied")) as discover:
+            cp.remove_car(self.store, car["id"])
+        discover.assert_not_called()
+        self.assertEqual(self.proc.signals, signals)
+        self.assertEqual(self.iterm.calls, calls)
+        self.assertEqual(self.store.load(car["id"])["removal_basis"], "manual_archive")
+
+    def test_manual_archive_is_idempotent(self):
+        car = self.parked_car()
+        cp.remove_car(self.store, car["id"])
         before = self.store.path(car["id"]).read_bytes()
-        with patch.object(cp, "discover", side_effect=cp.AutomationPermissionError("Access denied")):
-            with self.assertRaises(cp.AutomationPermissionError):
-                cp.remove_car(self.store, self.iterm, self.proc, car["id"])
+        cp.remove_car(self.store, car["id"])
         self.assertEqual(self.store.path(car["id"]).read_bytes(), before)
+
+    def test_manual_archive_write_failure_keeps_active_record(self):
+        car = self.parked_car()
+        before = self.store.path(car["id"]).read_bytes()
+        with patch.object(self.store, "save", side_effect=OSError("Disk full")):
+            with self.assertRaises(OSError):
+                cp.remove_car(self.store, car["id"])
+        self.assertEqual(self.store.path(car["id"]).read_bytes(), before)
+        self.assertEqual(self.store.load(car["id"])["status"], "parked")
 
     def test_automation_error_is_classified_without_reading_real_iterm(self):
         with patch.object(cp, "run", side_effect=cp.ParkError("Not authorized (-1743)")):

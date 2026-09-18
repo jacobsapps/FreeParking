@@ -1,7 +1,7 @@
 import Foundation
 
 enum CarDateLabel {
-    /// Weekdays for the last seven calendar days, explicit dates thereafter.
+    /// Weekday + day number for the last seven calendar days; explicit dates thereafter.
     /// Calendar days (not 24-hour intervals) keep this correct across DST.
     static func title(for date: Date, now: Date = .now,
                       calendar: Calendar = .current, locale: Locale = .current) -> String {
@@ -12,7 +12,7 @@ enum CarDateLabel {
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
         if (0..<7).contains(age) {
-            formatter.setLocalizedDateFormatFromTemplate("EEEE")
+            formatter.setLocalizedDateFormatFromTemplate("EEEEd")
         } else {
             let sameYear = calendar.component(.year, from: date) == calendar.component(.year, from: now)
             formatter.setLocalizedDateFormatFromTemplate(sameYear ? "dMMM" : "dMMMy")

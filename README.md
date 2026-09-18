@@ -13,6 +13,8 @@ removing one car kept other cars and recovery files intact. These tests are
 not a guarantee for every CLI version or interrupted task. Try a disposable
 window first. Disposable folder-tab round trips also verified exact saved titles,
 window geometry, automatic archival and per-window prompt-free closing.
+The latest speed and quit-handling changes have offline coverage (plus a
+read-only connection-timing check); final live verification is still pending.
 
 > **Permissions are deliberately skipped when agents resume.** Claude uses
 > `--dangerously-skip-permissions`; Codex uses `--sandbox danger-full-access`
@@ -62,16 +64,20 @@ helpers or Automation entitlement, and cannot read or close your real tabs.
    is interrupted or window closes.
 2. **Click a car** to reopen that window. Already-open, verified conversations
    are brought forward instead of duplicated. Saved tab titles and the window's
-   size and position are restored on newly created windows.
+   size and position are restored on newly created windows. The saved frame is
+   applied as soon as the window exists, before the remaining tabs and title updates.
 3. Once every saved session, folder and tab order is verified, the car **drives
    away into the archive automatically**. If anything is uncertain, it stays.
    Click the **archive icon → Bring back car** to recover it at any time.
 
 No bottom toolbar or scrolling home screen. The painted P stays available beside
 parked cars; larger collections use pages. **⋯ → Show tabs / Recovery** is there
-only if needed. **Remove car** archives manually: without a verified match it
-asks first, and it never closes terminals. Recent cars have weekday registration
-plates; older cars show dates. Animations respect macOS Reduce Motion.
+only if needed. **⋯ → Archive car** moves a car into the archive immediately,
+without confirmation or accessing iTerm. The archive icon briefly acknowledges
+the move. You can bring the car back at any time; no terminals are closed.
+Recent cars have weekday-and-day registration plates, such as **FRIDAY 18**;
+older cars include the month (and year when needed). Animations respect macOS
+Reduce Motion.
 
 ### Close warnings and saved titles
 
@@ -95,7 +101,9 @@ preserve shell history/scrollback. Other running shell jobs and unidentified
 agents block the operation with the affected window/tab named. Nothing closes
 when this initial check fails.
 
-Closing Free Parking itself does **not** park or close your terminals.
+Closing Free Parking itself does **not** park or close your terminals. You can
+quit during a refresh. If a save, park or restore is already in progress, the app
+finishes that operation and then quits, without a blocking confirmation dialog.
 Cancelling an iTerm close confirmation stops the remaining parking sequence;
 all recovery files remain. It cannot undo interrupts or closures that already
 happened.
@@ -141,7 +149,8 @@ Recovery files are private to your user and remain in:
 The original directory name is retained so the rename cannot strand backups.
 **Do not publish this directory:** it contains local paths and session identities.
 Removing a car archives its record; it does not delete the underlying recovery.
-Permission/read errors keep the car rather than treating iTerm as absent.
+Automatic archival requires a verified return; permission/read errors keep the
+car. Manual archival is reversible and does not need terminal permissions.
 
 ## Development
 

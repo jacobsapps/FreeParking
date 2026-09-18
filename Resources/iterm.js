@@ -72,25 +72,43 @@ function run(argv) {
         checkedWindow();
         return JSON.stringify({ok: true});
     }
-    if (request.action === 'set-title') {
-        const w = getWindow(request.windowId);
-        const tabs = w.tabs().filter(t => t.sessions().length === 1 && t.sessions()[0].id() === request.sessionId);
-        if (tabs.length !== 1 || typeof request.title !== 'string') {
-            throw new Error('The restored tab changed. Its title was not altered.');
-        }
+    if (request.action === 'set-title' || request.action === 'set-titles') {
+        const titles = request.action === 'set-title' ? [request] : request.titles;
+        if (!Array.isArray(titles) || !titles.length) throw new Error('No saved titles were provided.');
+        const seen = new Set();
+        const updates = titles.map(item => {
+            const w = getWindow(item.windowId);
+            const tabs = w.tabs().filter(t => t.sessions().length === 1 && t.sessions()[0].id() === item.sessionId);
+            if (tabs.length !== 1 || typeof item.title !== 'string' || seen.has(item.sessionId)) {
+                throw new Error('A restored tab changed. No titles were altered.');
+            }
+            seen.add(item.sessionId);
+            return {tab: tabs[0], title: item.title};
+        });
         // Assign the tab title, not the session name or terminal input. This
         // preserves Unicode/custom titles and never participates in broadcasting.
-        try { tabs[0].title = request.title; }
-        catch (_) { tabs[0].sessions()[0].name = request.title; }
-        if (tabTitle(tabs[0], tabs[0].sessions()[0]) !== request.title) {
-            throw new Error('iTerm could not restore the saved title. Enable its Python API and install its Python runtime (Scripts menu), then retry. The car is kept.');
+        for (const {tab, title} of updates) {
+            try { tab.title = title; }
+            catch (_) { tab.sessions()[0].name = title; }
+            if (tabTitle(tab, tab.sessions()[0]) !== title) {
+                throw new Error('iTerm could not restore the saved title. Enable its Python API and install its Python runtime (Scripts menu), then retry. The car is kept.');
+            }
         }
         return JSON.stringify({ok: true});
     }
     if (request.action === 'set-bounds') {
         const w = checkedWindow();
-        w.bounds = visibleBounds(request.bounds);
-        return JSON.stringify({ok: true, bounds: w.bounds()});
+        const target = visibleBounds(request.bounds);
+        w.bounds = target;
+        let actual = w.bounds();
+        for (let i = 0; i < 4 && ['x', 'y', 'width', 'height'].some(k => Math.abs(actual[k] - target[k]) > 1); i++) {
+            $.NSThread.sleepForTimeInterval(0.05);
+            actual = w.bounds();
+        }
+        if (!validBounds(actual) || ['x', 'y', 'width', 'height'].some(k => Math.abs(actual[k] - target[k]) > 1)) {
+            throw new Error('iTerm did not retain the saved window size. The car has been kept; retry after the window finishes opening.');
+        }
+        return JSON.stringify({ok: true, bounds: actual});
     }
     if (request.action === 'close') {
         const w = checkedWindow();

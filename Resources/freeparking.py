@@ -8,6 +8,7 @@ No agents, hooks, preferences, Accessibility, shell history, or network services
 from __future__ import annotations
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import fcntl
 import hashlib
@@ -66,7 +67,7 @@ def run(args, timeout=20, input=None):
 
 class ITerm:
     def call(self, action, **kwargs):
-        if action in ("close", "set-title"):
+        if action in ("close", "set-title", "set-titles"):
             if action == "close":
                 self.call("check", **kwargs)
             runtime = iterm_python_runtime()
@@ -382,9 +383,14 @@ def valid_bounds(value):
 def discover(iterm, process_api):
     windows = iterm.windows()
     processes, hooks = process_api.all(), read_hook_records()
+    # Independent file/process reads run concurrently; map keeps the original
+    # window/tab order. Never parallelize window mutations or process signals.
+    raw_tabs = [tab for window in windows for tab in window["tabs"]]
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(raw_tabs)))) as pool:
+        resolved = iter(list(pool.map(lambda tab: resolve_tab(tab, processes, process_api, hooks), raw_tabs)))
     result = []
     for w in windows:
-        tabs = [resolve_tab(t, processes, process_api, hooks) for t in w["tabs"]]
+        tabs = [next(resolved) for _ in w["tabs"]]
         row = {"id": w["id"], "title": w["title"], "tabs": tabs,
                "can_park": bool(tabs) and all(not t["issue"] for t in tabs)}
         if w.get("bounds") is not None:
@@ -722,6 +728,8 @@ def restore(store, iterm, process_api, car_id):
         car["pending_tab"] = None
         opened += 1
         store.save(car)
+        if opened == 1 and car.get("bounds_pending"):
+            restore_window_bounds(store, iterm, car)
 
     # Already-open conversations are brought forward, not duplicated. Select
     # the exact windows, verifying their recorded tab IDs again in the adapter.
@@ -731,20 +739,22 @@ def restore(store, iterm, process_api, car_id):
     for index in range(len(car["tabs"])):
         target = targets[str(index)]
         by_window.setdefault(target["window_id"], []).append(target["terminal_id"])
-    for index, tab in enumerate(car["tabs"]):
-        target = targets[str(index)]
-        if target.get("title_pending"):
-            iterm.call("set-title", windowId=target["window_id"], sessionId=target["terminal_id"], title=tab["title"])
+    # Adding the tab bar can change the frame. Settle geometry before any
+    # title/API startup work, without resizing an already-open matched window.
+    if opened and len(by_window.get(window_id, [])) > 1 and car.get("created_window_id") == window_id and car.get("window_bounds"):
+        car["bounds_pending"] = True
+        store.save(car)
+    restore_window_bounds(store, iterm, car)
+    pending_titles = [{"windowId": targets[str(index)]["window_id"],
+                       "sessionId": targets[str(index)]["terminal_id"], "title": tab["title"]}
+                      for index, tab in enumerate(car["tabs"]) if targets[str(index)].get("title_pending")]
+    if pending_titles:
+        # One connection/runtime startup for the whole window, not one per tab.
+        # Partial failure retains all flags: setting an exact tab's title again
+        # is harmless, and retrying must never launch another session.
+        iterm.call("set-titles", titles=pending_titles)
+        for target in targets.values():
             target["title_pending"] = False
-            store.save(car)
-    if car.get("bounds_pending"):
-        created_window = car["created_window_id"]
-        if created_window not in by_window:
-            raise ParkError("The newly restored window moved or closed. The car has been kept.")
-        result = iterm.call("set-bounds", windowId=created_window,
-                            sessionIds=by_window[created_window], bounds=car["window_bounds"])
-        car["restored_bounds"] = result.get("bounds")
-        car["bounds_pending"] = False
         store.save(car)
     for window_id, terminal_ids in reversed(list(by_window.items())):
         iterm.call("focus", windowId=window_id, sessionIds=terminal_ids)
@@ -753,6 +763,23 @@ def restore(store, iterm, process_api, car_id):
                    if opened else "Your conversations are already open. Their windows were brought forward.")
     store.save(car)
     return car["note"]
+
+
+def restore_window_bounds(store, iterm, car):
+    if not car.get("bounds_pending"):
+        return
+    window_id = car["created_window_id"]
+    session_ids = [car["restored_targets"][str(i)]["terminal_id"] for i in range(len(car["tabs"]))
+                   if str(i) in car["restored_targets"]
+                   and car["restored_targets"][str(i)]["window_id"] == window_id]
+    if not session_ids:
+        raise ParkError("The newly restored window moved or closed. The car has been kept.")
+    result = iterm.call("set-bounds", windowId=window_id, sessionIds=session_ids, bounds=car["window_bounds"])
+    if not valid_bounds(result.get("bounds")):
+        raise ParkError("The restored window size could not be checked. The car has been kept.")
+    car["restored_bounds"] = result["bounds"]
+    car["bounds_pending"] = False
+    store.save(car)
 
 
 def verify_return(car, iterm, process_api):
@@ -858,9 +885,9 @@ def restore_all(store, iterm, process_api):
 def archive_car(store, car, verified):
     car["status"] = "archived"
     car["confirmed_at"] = now()
-    car["removal_basis"] = "verified_live_return" if verified else "explicit_unverified_confirmation"
+    car["removal_basis"] = "verified_live_return" if verified else "manual_archive"
     car["note"] = ("All saved sessions were identified in their open tabs. Recovery backup retained."
-                   if verified else "You explicitly removed this car without a verified live return. Recovery backup retained.")
+                   if verified else "Manually archived. Recovery backup retained; no terminal windows were changed.")
     store.save(car)
     return "Car removed from the garage. Its recovery backup is kept."
 
@@ -872,27 +899,13 @@ def confirm_return(store, iterm, process_api, car_id):
     return archive_car(store, car, verified=True)
 
 
-def removal_token(car):
-    # Bind confirmation to this exact car AND revision. It is a stale-action
-    # guard, not a credential. Never consume a confirmation for another car.
-    return hashlib.sha256(json.dumps(car, sort_keys=True).encode()).hexdigest()
-
-
-def remove_car(store, iterm, process_api, car_id, confirmation=None):
+def remove_car(store, car_id):
+    """Manual removal is a reversible, disk-only archive. No terminal check."""
     car = store.load(car_id)
     if car["status"] == "archived":
-        raise ParkError("This car was already removed. Refresh the garage.")
-    if confirmation is not None:
-        if confirmation != removal_token(car):
-            raise ParkError("This car changed after the confirmation appeared. Check it and choose Remove car again.")
-        return {"message": archive_car(store, car, verified=False)}
-    try:
-        verify_return(car, iterm, process_api)
-    except ReturnNotVerified as error:
-        # No disk mutation: Cancel or dismiss must leave the car untouched.
-        return {"confirmation_required": {"car_id": car["id"],
-                "token": removal_token(car), "reason": str(error)}}
-    return {"message": archive_car(store, car, verified=True)}
+        return {"message": ""}
+    archive_car(store, car, verified=False)
+    return {"message": ""}
 
 
 def main(argv):
@@ -906,7 +919,7 @@ def main(argv):
             response["windows"] = discover(iterm, process_api)
             with store.lock():
                 response["verified_archived_ids"] = archive_verified_returns(store, iterm, process_api)
-        elif action in ("park-all", "restore-all", "park", "restore", "confirm-return", "remove", "remove-confirmed", "unarchive"):
+        elif action in ("park-all", "restore-all", "park", "restore", "confirm-return", "remove", "unarchive"):
             with store.lock():
                 if action == "park-all" and len(argv) == 1:
                     response["message"] = park_all(store, iterm, process_api)
@@ -922,9 +935,7 @@ def main(argv):
                 elif action == "confirm-return" and len(argv) == 2:
                     response["message"] = confirm_return(store, iterm, process_api, argv[1])
                 elif action == "remove" and len(argv) == 2:
-                    response.update(remove_car(store, iterm, process_api, argv[1]))
-                elif action == "remove-confirmed" and len(argv) == 3:
-                    response.update(remove_car(store, iterm, process_api, argv[1], confirmation=argv[2]))
+                    response.update(remove_car(store, argv[1]))
                 else:
                     raise ParkError("Missing operation arguments.")
         else:

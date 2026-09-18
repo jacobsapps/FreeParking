@@ -7,6 +7,15 @@ struct GarageInteractionTests {
     @MainActor
     static func main() throws {
         precondition(PreviewMode.enabled)
+        for operation in ["scan", "list"] {
+            precondition(!QuitPolicy.mustWait(operation: operation, busy: true))
+        }
+        for operation in ["park", "park-all", "restore", "restore-all", "remove", "unarchive", "unknown"] {
+            precondition(QuitPolicy.mustWait(operation: operation, busy: true))
+            precondition(!QuitPolicy.mustWait(operation: operation, busy: false))
+        }
+        precondition(!QuitPolicy.mustWait(operation: nil, busy: false))
+        precondition(QuitPolicy.mustWait(operation: nil, busy: true))
         let a = PreviewFixtures.cars[0].withStatus("restored", note: "Fictional match")
         let b = PreviewFixtures.cars[1]
         let garage = Garage()
@@ -15,20 +24,20 @@ struct GarageInteractionTests {
 
         garage.removeCar(a)
         precondition(garage.cars.map(\.id) == [b.id])
-        precondition(garage.pendingRemoval == nil)
-
+        precondition(garage.archives.map(\.id) == [a.id])
+        precondition(garage.archivePulse == 1 && garage.archiveAcknowledged)
+        garage.removeCar(a) // Stale action cannot affect another car.
+        precondition(garage.archivePulse == 1)
+        garage.busy = true
         garage.removeCar(b)
-        let request = garage.pendingRemoval!
-        precondition(request.carId == b.id && garage.cars.count == 1)
-        garage.pendingRemoval = nil // Cancel does not remove anything.
         precondition(garage.cars.map(\.id) == [b.id])
-
-        garage.removeCar(b)
-        garage.confirmRemoval(RemovalRequest(carId: a.id, token: request.token, reason: "Wrong car"))
-        precondition(garage.pendingRemoval?.carId == b.id)
+        garage.busy = false
+        garage.removeCar(b) // Unopened cars archive without any confirmation.
+        precondition(garage.cars.isEmpty && garage.archives.count == 2)
+        precondition(garage.archivePulse == 2)
+        garage.bringBack(b)
         precondition(garage.cars.map(\.id) == [b.id])
-        garage.confirmRemoval(request)
-        precondition(garage.cars.isEmpty && garage.pendingRemoval == nil)
+        precondition(garage.cars[0].tabs.count == b.tabs.count)
 
         garage.cars = [a, b]
         garage.open(b)
@@ -71,11 +80,10 @@ struct GarageInteractionTests {
         } catch is BackendError { /* Expected: denied before helper lookup. */ }
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let response = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"confirmation_required":{"car_id":"sample-car","token":"revision","reason":"Missing tabs"}}"#.utf8))
-        precondition(response.confirmationRequired?.carId == "sample-car")
-        precondition(response.confirmationRequired?.token == "revision")
+        let response = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"verified_archived_ids":["sample-car"]}"#.utf8))
+        precondition(response.verifiedArchivedIds == ["sample-car"])
         let denial = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":false,"windows":[],"cars":[],"warnings":[],"error_code":"automation_denied","error":"Permission denied"}"#.utf8))
-        precondition(denial.errorCode == "automation_denied" && denial.confirmationRequired == nil)
-        print("UI-model checks passed: exact-car removal, cancellation, mismatched confirmation, multiple cars, another parking action, preview isolation.")
+        precondition(denial.errorCode == "automation_denied")
+        print("UI-model checks passed: quit during refresh, mutation quit guard, immediate reversible archive, feedback, stale/busy guards, multiple cars, one-click parking, preview isolation.")
     }
 }

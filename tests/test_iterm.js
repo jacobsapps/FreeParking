@@ -5,17 +5,18 @@ const vm = require('node:vm');
 const source = fs.readFileSync('Resources/iterm.js', 'utf8');
 const session = {id:()=> 'fixture-session', tty:()=> '/dev/fixture', name:()=> 'Fallback'};
 let selected = 0, closed = 0, title = 'Task title';
+let rejectBounds = false;
 let bounds = {x:80,y:60,width:900,height:600};
 const tab = {sessions:()=>[session]};
 Object.defineProperty(tab, 'title', {get:()=>()=>title, set:v=>title=v});
 const live = {id:()=>1, name:()=> 'Fixture', tabs:()=>[tab], select:()=>selected++, close:()=>closed++};
-Object.defineProperty(live, 'bounds', {get:()=>()=>bounds, set:v=>bounds=v});
+Object.defineProperty(live, 'bounds', {get:()=>()=>bounds, set:v=>{if (!rejectBounds) bounds=v;}});
 const undo = {id:()=>2, name:()=> 'Retained closed window', tabs:()=>null};
 const app = {running:()=>true, windows:()=>[undo,live], activate:()=>{}};
 const frame = {origin:{x:0,y:0},size:{width:1440,height:900}};
 const visibleFrame = {origin:{x:0,y:25},size:{width:1440,height:850}};
 const context = vm.createContext({Application:()=>app, ObjC:{import:()=>{}},
-    $:{NSScreen:{screens:{count:1,objectAtIndex:()=>({frame,visibleFrame})}}}});
+    $:{NSThread:{sleepForTimeInterval:()=>{}}, NSScreen:{screens:{count:1,objectAtIndex:()=>({frame,visibleFrame})}}}});
 vm.runInContext(source,context);
 function call(request){return JSON.parse(context.run([JSON.stringify(request)]));}
 const rows=call({action:'list'});
@@ -39,4 +40,12 @@ call({action:'set-bounds',windowId:'1',sessionIds:['fixture-session'],bounds:{x:
 assert.deepEqual(JSON.parse(JSON.stringify(bounds)),{x:0,y:25,width:1440,height:850});
 assert.throws(()=>call({action:'set-bounds',windowId:'1',sessionIds:['wrong'],bounds:{x:0,y:0,width:800,height:500}}));
 assert.throws(()=>call({action:'set-bounds',windowId:'1',sessionIds:['fixture-session'],bounds:{x:0,y:0,width:-1,height:500}}));
+const entry = {windowId:'1',sessionId:'fixture-session',title:'Batched'};
+for (const invalid of [{...entry,sessionId:'wrong'}, entry]) {
+    assert.throws(()=>call({action:'set-titles',titles:[entry,invalid]}));
+    assert.equal(title,savedTitle); // Preflight the whole batch before any writes.
+}
+call({action:'set-titles',titles:[entry]});assert.equal(title,'Batched');
+rejectBounds=true;
+assert.throws(()=>call({action:'set-bounds',windowId:'1',sessionIds:['fixture-session'],bounds:{x:40,y:45,width:800,height:550}}), /did not retain/);
 console.log('JXA checks passed: exact targeting, title restoration, geometry and disconnected-display clamping.');

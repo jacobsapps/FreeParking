@@ -40,6 +40,7 @@ struct FreeParkingApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var garage: Garage?
     private var captureConfigured = false
+    private var pendingQuit: Task<Void, Never>?
 
     func configurePreviewCapture() {
         guard PreviewMode.enabled, !captureConfigured else { return }
@@ -64,8 +65,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     let content: AnyView
                     if PreviewMode.scene == "archive" {
                         content = AnyView(ArchiveView(exporting: true).environmentObject(garage))
-                    } else if PreviewMode.scene == "remove-confirm", let request = garage.pendingRemoval {
-                        content = AnyView(RemovalConfirmation(request: request).environmentObject(garage))
                     } else if PreviewMode.scene == "details", let car = garage.cars.first {
                         content = AnyView(CarDetails(car: car, exporting: true).environmentObject(garage)
                             .background(Color(nsColor: .windowBackgroundColor)))
@@ -100,7 +99,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             if ProcessInfo.processInfo.arguments.contains("--preview-auto-exit") {
                 try? await Task.sleep(for: .seconds(3))
-                garage?.pendingRemoval = nil
                 garage?.selectedCar = nil
                 garage?.recoveryCar = nil
                 garage?.selectedWindow = nil
@@ -112,13 +110,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard garage?.isPreview != true, garage?.busy == true else { return .terminateNow }
-        // Do not abandon an in-flight save/close or create a restore ambiguity.
-        let alert = NSAlert()
-        alert.messageText = "Free Parking is still working"
-        alert.informativeText = "Wait for the current operation to finish. If iTerm shows a close confirmation, finish or cancel it first. Your recovery file is kept."
-        alert.addButton(withTitle: "Keep Free Parking Open")
-        alert.runModal()
-        return .terminateCancel
+        guard garage?.isPreview != true, garage?.mustFinishBeforeQuitting == true else { return .terminateNow }
+        // Never run a blocking alert here: it can prevent the main-actor task
+        // from publishing completion, making a finished operation appear stuck.
+        // Wait without another prompt, then honor the original Quit request.
+        if pendingQuit == nil {
+            pendingQuit = Task { @MainActor [weak self] in
+                while self?.garage?.mustFinishBeforeQuitting == true {
+                    try? await Task.sleep(for: .milliseconds(100))
+                }
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+        }
+        return .terminateLater
     }
 }

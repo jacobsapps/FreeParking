@@ -53,7 +53,6 @@ struct GarageView: View {
         .sheet(item: $garage.selectedCar) { CarDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.recoveryCar) { RecoveryDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.selectedWindow) { WindowDetails(window: $0).environmentObject(garage) }
-        .sheet(item: $garage.pendingRemoval) { RemovalConfirmation(request: $0).environmentObject(garage) }
         .sheet(isPresented: $showingProblem) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Details").font(.system(size: 20, weight: .semibold))
@@ -79,9 +78,7 @@ struct GarageView: View {
             Button { garage.scan() } label: { Image(systemName: "arrow.clockwise").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).disabled(garage.busy).help("Refresh window count")
                 .accessibilityLabel("Refresh window count")
-            Button { garage.showingArchive = true } label: { Image(systemName: "archivebox").frame(width: 22, height: 28) }
-                .buttonStyle(.plain).help("Archived cars").accessibilityLabel("Archived cars")
-                .accessibilityIdentifier("show-archive")
+            ArchiveButton()
         }
         .padding(.bottom, 2)
     }
@@ -114,12 +111,12 @@ private struct NewParkingBay: View {
             Button { garage.parkAll() } label: {
                 PaintedParkingSpace().frame(width: large ? 144 : 112, height: large ? 152 : 106)
             }
-            .buttonStyle(.plain).disabled(garage.busy || garage.pendingRemoval != nil)
+            .buttonStyle(.plain).disabled(garage.busy)
             .help("Save and close my iTerm windows").accessibilityLabel("Park my windows")
             .accessibilityIdentifier("park-bay")
             Button("Park my windows") { garage.parkAll() }
                 .buttonStyle(ParkingButtonStyle(prominent: true))
-                .disabled(garage.busy || garage.pendingRemoval != nil)
+                .disabled(garage.busy)
                 .accessibilityIdentifier("park-all-windows")
             if !large { Color.clear.frame(height: 40) }
         }
@@ -143,7 +140,7 @@ private struct ParkedBay: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(working ? (garage.removingCar ? "Checking…" : "Opening…") : car.hasReturned ? "Not yet verified" : "")
+                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Not yet verified" : "")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(ParkingStyle.secondary)
                 Spacer(minLength: 0)
                 Button { showingActions.toggle() } label: {
@@ -215,7 +212,7 @@ private struct ParkedBay: View {
             Button("Show tabs") { garage.selectedCar = car }
             Button("Recovery…") { garage.recoveryCar = car }
             Divider()
-            Button("Remove car…") { garage.removeCar(car) }.disabled(garage.busy)
+            Button("Archive car") { garage.removeCar(car) }.disabled(garage.busy)
         }
     }
 }
@@ -234,8 +231,8 @@ struct CarActions: View {
             action("Show tabs", icon: "list.bullet") { garage.selectedCar = car }
             action("Recovery…", icon: "lifepreserver") { garage.recoveryCar = car }
             Divider().overlay(ParkingStyle.secondary.opacity(0.2)).padding(.vertical, 4)
-            action("Remove car…", icon: "minus.circle") { garage.removeCar(car) }.disabled(garage.busy)
-                .accessibilityIdentifier("menu-remove-car-" + car.id)
+            action("Archive car", icon: "minus.circle") { garage.removeCar(car) }.disabled(garage.busy)
+                .accessibilityIdentifier("menu-archive-car-" + car.id)
         }
         .padding(8).frame(width: 200)
         .foregroundStyle(ParkingStyle.ink).background(ParkingStyle.surface)
@@ -334,5 +331,33 @@ struct ArchiveView: View {
                 .padding(12).background(ParkingStyle.surface, in: RoundedRectangle(cornerRadius: 9))
             }
         }
+    }
+}
+
+
+private struct ArchiveButton: View {
+    @EnvironmentObject private var garage: Garage
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button { garage.showingArchive = true } label: {
+            Image(systemName: garage.archiveAcknowledged ? "archivebox.fill" : "archivebox")
+                .foregroundStyle(garage.archiveAcknowledged ? ParkingStyle.yellow : ParkingStyle.ink)
+                .symbolEffect(.bounce, value: reduceMotion ? 0 : garage.archivePulse)
+                .frame(width: 26, height: 28)
+                .overlay(alignment: .topTrailing) {
+                    if garage.archiveAcknowledged {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(ParkingStyle.darkInk, ParkingStyle.yellow)
+                            .offset(x: 5, y: -3)
+                            .transition(reduceMotion ? .opacity : .scale.combined(with: .opacity))
+                    }
+                }
+        }
+        .buttonStyle(.plain).help("Archived cars · recovery kept")
+        .accessibilityLabel("Archived cars")
+        .accessibilityValue(garage.archiveAcknowledged ? "Car archived" : "")
+        .accessibilityIdentifier("show-archive")
     }
 }
