@@ -28,7 +28,7 @@ You need:
 - **macOS 14 or later**, iTerm2, and Xcode Command Line Tools (`xcode-select --install`).
 - Swift 5.9+ and the developer-tools `/usr/bin/python3`.
 - Claude Code and/or Codex CLI, installed, signed in, and available in your
-  interactive login `zsh`. Live-tested with Codex 0.153.2 and Claude Code 2.1.274.
+  interactive login `zsh`. Live-tested with Codex 0.153.2 / 0.160.1 and Claude Code 2.1.274.
 
 ```sh
 git clone https://github.com/jacobsapps/FreeParking.git
@@ -121,6 +121,14 @@ happened.
   tmux or SSH. Unknown work blocks parking rather than being silently killed.
 - **A saved conversation is required.** Brand-new Codex sessions without a
   saved transcript may not be identifiable. Finish a turn and scan again.
+- **Shared-server Codex sessions must be idle.** With Codex 0.160.1, discovery
+  uses iTerm's native task title and foreground PID, the process folder, and an
+  exact, unique match in Codex's saved session index/transcript. Decorative tab
+  titles are not used for identity; duplicate names in the same folder block
+  parking rather than picking the newest. Finish or cancel active turns before
+  parking. Free Parking never interrupts the shared server or its child jobs.
+  Older direct-transcript discovery is retained. No Codex RPC, new hook, or
+  `--no-daemon` launch option is required.
 - **Claude discovery uses local session metadata.** With the tested Claude
   version, the app matches its native process registry by PID, process birth
   time, working directory and exact saved transcript. No custom hook is needed.
@@ -160,6 +168,34 @@ Automatic archival requires a verified return; permission/read errors keep the
 car. Manual archival is reversible and does not need terminal permissions.
 
 ## Development
+
+### Disposable-window testing
+
+Production always parks all windows, one car per window; there is no window
+picker. For live development tests only, create a disposable iTerm window and
+record its exact iTerm window ID and session IDs in a private manifest:
+
+```json
+{"window_id":"DISPOSABLE_WINDOW_ID","session_ids":["DISPOSABLE_SESSION_ID"]}
+```
+
+Launch a separate app instance with this absolute manifest path:
+
+```sh
+open -n "dist/Free Parking.app" --args --test-scope=/absolute/private/scope.json
+```
+
+The header shows **TEST WINDOW**. Only that exact window and its journaled
+restored windows are visible or mutable. If another tab is added, testing stops
+rather than touching it. Recovery uses a separate `garage` directory beside the
+manifest, never the production garage. The backend accepts the same scope as
+`Resources/freeparking.py --test-scope /absolute/private/scope.json scan` (or
+`park-all`, then `restore CAR_ID`). Never select a working window as the fixture.
+
+The 0.160.1 compatibility change has a disposable one-tab live round trip:
+park, resume the exact ID, read back the original response, and automatically
+archive recovery. Shared-server exclusion and ambiguous identities also have
+offline coverage; this does not establish every multi-window/CLI combination.
 
 Offline checks use fakes and do not interact with real terminals:
 

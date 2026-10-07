@@ -74,6 +74,12 @@ struct BackendResponse: Decodable, Sendable {
 }
 
 enum LocalBackend {
+    static var testScope: String? {
+        let prefix = "--test-scope="
+        return ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) })
+            .map { String($0.dropFirst(prefix.count)) }
+    }
+
     static func call(_ arguments: [String]) throws -> BackendResponse {
         guard !PreviewMode.enabled else {
             throw BackendError("Terminal access is disabled in the UI preview.")
@@ -94,7 +100,8 @@ enum LocalBackend {
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        process.arguments = [script.path] + arguments
+        let scopeArguments = testScope.map { ["--test-scope", $0] } ?? []
+        process.arguments = [script.path] + scopeArguments + arguments
         let output = Pipe()
         process.standardOutput = output
         // A separate file avoids pipe deadlocks if macOS emits long permission errors.

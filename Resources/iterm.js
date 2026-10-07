@@ -32,6 +32,11 @@ function run(argv) {
         return session.name();
     }
 
+    function variable(session, name) {
+        try { return session.variable({named: name}) || ''; }
+        catch (_) { return ''; } // Older iTerm versions retain descriptor discovery.
+    }
+
     function validBounds(b) {
         return b && ['x', 'y', 'width', 'height'].every(k => typeof b[k] === 'number' && Number.isFinite(b[k])) &&
             b.width > 0 && b.height > 0;
@@ -64,7 +69,8 @@ function run(argv) {
             bounds: w.bounds(),
             tabs: w.tabs().map((t, index) => ({
                 index: index,
-                sessions: t.sessions().map(s => ({id: s.id(), tty: s.tty(), title: tabTitle(t, s)}))
+                sessions: t.sessions().map(s => ({id: s.id(), tty: s.tty(), title: tabTitle(t, s),
+                    native_title: variable(s, 'autoName'), job_pid: variable(s, 'jobPid')}))
             }))
         })));
     }

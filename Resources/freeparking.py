@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shlex
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -152,7 +153,8 @@ class Processes:
 
     def send_signal(self, process, number):
         # PID alone is not identity. Never signal a reused PID.
-        if same_process(process, self.all().get(process["pid"])):
+        current = self.all()
+        if same_process(process, current.get(process["pid"])) and safe_tracked_processes([process], current):
             try:
                 os.kill(process["pid"], number)
             except ProcessLookupError:
@@ -169,10 +171,11 @@ def process_key(process):
 
 
 def descendants(roots, processes):
-    found = {p["pid"]: p for p in roots if same_process(p, processes.get(p["pid"]))}
+    found = {p["pid"]: p for p in roots if same_process(p, processes.get(p["pid"]))
+             and not shared_codex_server(p)}
     while True:
         additions = {pid: p for pid, p in processes.items()
-                     if p["ppid"] in found and pid not in found}
+                     if p["ppid"] in found and pid not in found and not shared_codex_server(p)}
         if not additions:
             return list(found.values())
         found.update(additions)
@@ -180,6 +183,25 @@ def descendants(roots, processes):
 
 def merge_processes(first, second):
     return list({process_key(p): p for p in first + second}.values())
+
+
+def shared_codex_server(process):
+    # Codex's shared server/updater are children of whichever TUI started them,
+    # not work owned by that tab. Do not traverse into their process trees.
+    return "/app-server-daemon/" in process.get("executable", "")
+
+
+def safe_tracked_processes(saved, processes):
+    """Also protect shared descendants in recovery written by an older build."""
+    def protected(process):
+        seen = set()
+        while process and process["pid"] not in seen:
+            if shared_codex_server(process):
+                return True
+            seen.add(process["pid"])
+            process = processes.get(process["ppid"])
+        return False
+    return [p for p in saved if not protected(processes.get(p["pid"], p))]
 
 
 def read_hook_records():
@@ -196,7 +218,8 @@ def codex_metadata(path):
             raise ValueError("Not a Codex session")
         meta = first["payload"]
         # Ignore subagents' transcripts opened by the same Codex process.
-        if meta.get("source") != "cli":
+        if meta.get("source") != "cli" and not (
+                meta.get("source") == "vscode" and meta.get("originator") == "codex-tui"):
             raise ValueError("Not a top-level CLI session")
         cwd = meta["cwd"]
         # A session may have changed working root after it started. Only inspect
@@ -215,6 +238,51 @@ def codex_metadata(path):
                 continue
     return {"session_id": session_uuid(meta["id"]), "cwd": cwd,
             "transcript_path": path, "identity_source": "open transcript"}
+
+
+def codex_terminal_metadata(session, process, process_api, root=None):
+    """Read the native TUI title and exact saved index; no Codex RPC or hooks.
+
+    The decorative tab title is NOT an identity. Only the foreground Codex
+    job's native title, its folder, and a unique saved thread may match.
+    Never pick the latest entry or collapse ambiguous names.
+    """
+    title = str(session.get("native_title") or "")
+    if str(session.get("job_pid", "")) != str(process["pid"]):
+        raise ParkError("iTerm cannot identify this Codex tab's foreground job. Nothing closed.")
+    title = re.sub(r"^[\s\u2800-\u28ff]+", "", title)
+    title, action_required = re.subn(r"^\[\s*[.!]\s*\]\s*Action Required\s*\|\s*", "", title)
+    match = re.fullmatch(r"(.+?)\s+\|\s+(Ready|Working|Waiting|Thinking|Starting|Loading|Connecting|Idle)", title)
+    if not match and not (action_required and title.strip()):
+        raise ParkError("Codex has not published a saved conversation title for this tab yet. Finish a turn, then refresh.")
+    name, status = match.groups() if match else (title, "Waiting")
+    if action_required:
+        status = "Waiting"
+    name = re.sub(r"\s+[\u2800-\u28ff]+$", "", name).strip()
+    cwd = process_api.cwd(process["pid"])
+    root = Path(root) if root is not None else Path.home() / ".codex"
+    databases = sorted(root.glob("state_*.sqlite"),
+                       key=lambda p: int(p.stem.split("_")[-1]) if p.stem.split("_")[-1].isdigit() else -1,
+                       reverse=True)
+    if not databases:
+        raise ParkError("Codex's saved session index is unavailable. Nothing closed.")
+    try:
+        with contextlib.closing(sqlite3.connect(databases[0].resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            # Before title generation completes, Codex uses the actual UUID.
+            field = "id" if UUID_RE.fullmatch(name) else "name"
+            rows = db.execute("SELECT id, rollout_path FROM threads WHERE " + field + " = ? AND cwd = ?",
+                              (name, cwd)).fetchall()
+    except sqlite3.Error as error:
+        raise ParkError("Cannot read Codex's saved session index. Nothing closed.") from error
+    if len(rows) != 1:
+        raise ParkError("Codex's native title and folder do not identify exactly one saved conversation. Nothing closed.")
+    sid, path = rows[0]
+    metadata = codex_metadata(path)
+    if metadata["session_id"] != sid or metadata["cwd"] != cwd:
+        raise ParkError("Codex's session index and saved conversation disagree. Nothing closed.")
+    metadata.update(identity_source="Codex native title and saved index", shared_session=True,
+                    native_status=status)
+    return metadata
 
 
 def claude_native_metadata(process, process_api, root=None):
@@ -356,6 +424,8 @@ def resolve_tab(tab, processes, process_api, hooks):
             metadata = next(iter(candidates.values()))
         elif not candidates and provider == "claude":
             metadata = claude_hook_metadata(session["id"], process, hooks)
+        elif not candidates and provider == "codex":
+            metadata = codex_terminal_metadata(session, process, process_api)
         else:
             raise ParkError("No unique saved conversation found yet. Let a turn finish, then refresh.")
         if not os.path.isabs(metadata["cwd"]) or not Path(metadata["cwd"]).is_dir():
@@ -380,6 +450,14 @@ def valid_bounds(value):
             and value["width"] > 0 and value["height"] > 0)
 
 
+def parking_issue(tab):
+    if tab["issue"]:
+        return tab["issue"]
+    if tab.get("shared_session") and tab.get("native_status") not in ("Ready", "Idle"):
+        return "Codex is still working or waiting for input. Finish or cancel its turn before parking; the shared server will not be interrupted."
+    return ""
+
+
 def discover(iterm, process_api):
     windows = iterm.windows()
     processes, hooks = process_api.all(), read_hook_records()
@@ -392,7 +470,7 @@ def discover(iterm, process_api):
     for w in windows:
         tabs = [next(resolved) for _ in w["tabs"]]
         row = {"id": w["id"], "title": w["title"], "tabs": tabs,
-               "can_park": bool(tabs) and all(not t["issue"] for t in tabs)}
+               "can_park": bool(tabs) and all(not parking_issue(t) for t in tabs)}
         if w.get("bounds") is not None:
             if not valid_bounds(w["bounds"]):
                 raise ParkError("iTerm returned an unreadable window size. Nothing was closed.")
@@ -565,6 +643,13 @@ def close_saved_car(store, iterm, process_api, car):
         current = process_api.all()
         if not all(same_process(p, current.get(p["pid"])) for p in roots):
             raise ParkError("An agent changed after saving. Nothing was interrupted.")
+        # A TUI can switch threads without changing PID. Recheck the saved
+        # conversation, not just the process, immediately before closing.
+        fresh = next((w for w in discover(iterm, process_api) if w["id"] == car["source_window_id"]), None)
+        if not fresh or not fresh["can_park"] or fingerprint(fresh) != fingerprint(car):
+            raise ParkError("A conversation changed or started working after saving. Nothing was interrupted.")
+        car["tracked_processes"] = safe_tracked_processes(car["tracked_processes"], current)
+        store.save(car)
         # No synthetic keystrokes: iTerm's AppleScript write command can
         # broadcast input to other windows. Signal only captured process IDs.
         for process in reversed(car["tracked_processes"]):
@@ -572,8 +657,9 @@ def close_saved_car(store, iterm, process_api, car):
                 process_api.send_signal(process, signal.SIGINT)
         if agent_roots:
             time.sleep(1)
-        car["tracked_processes"] = merge_processes(
-            car["tracked_processes"], descendants(agent_roots, process_api.all()))
+        current = process_api.all()
+        car["tracked_processes"] = safe_tracked_processes(merge_processes(
+            car["tracked_processes"], descendants(agent_roots, current)), current)
         store.save(car)
         # SIGINT can make every agent exit, and iTerm may then close the
         # window itself. Do not target its retained Undo-window object.
@@ -592,8 +678,9 @@ def close_saved_car(store, iterm, process_api, car):
             # iTerm can retain closed sessions for Undo. Explicitly terminate
             # only the saved agent processes and their observed descendants.
             # Never signal a shell, iTerm itself, a process group, or all agents.
-            car["tracked_processes"] = merge_processes(
-                car["tracked_processes"], descendants(agent_roots, process_api.all()))
+            current = process_api.all()
+            car["tracked_processes"] = safe_tracked_processes(merge_processes(
+                car["tracked_processes"], descendants(agent_roots, current)), current)
             store.save(car)
             for process in reversed(car["tracked_processes"]):
                 process_api.send_signal(process, signal.SIGTERM)
@@ -620,7 +707,7 @@ def park(store, iterm, process_api, window_id, expected_fingerprint):
     if not window or window["fingerprint"] != expected_fingerprint:
         raise ParkError("The window or its conversations changed. Refresh before parking.")
     if not window["can_park"]:
-        raise ParkError("Some tabs cannot be saved. Nothing has been interrupted or closed.")
+        raise ParkError("Nothing closed. " + "\n".join(filter(None, (parking_issue(t) for t in window["tabs"]))))
     car = prepare_car(store, window, process_api)
     return close_saved_car(store, iterm, process_api, car)
 
@@ -629,9 +716,9 @@ def park_all(store, iterm, process_api):
     windows = discover(iterm, process_api)
     if not windows:
         return "No iTerm windows are open."
-    blocked = [(i + 1, t) for i, w in enumerate(windows) for t in w["tabs"] if t["issue"]]
+    blocked = [(i + 1, t) for i, w in enumerate(windows) for t in w["tabs"] if parking_issue(t)]
     if blocked or any(not w["can_park"] for w in windows):
-        detail = "\n".join("Window " + str(i) + ", tab " + str(t["index"] + 1) + ": " + t["issue"] for i, t in blocked)
+        detail = "\n".join("Window " + str(i) + ", tab " + str(t["index"] + 1) + ": " + parking_issue(t) for i, t in blocked)
         raise ParkError("Nothing closed. " + (detail or "An empty window could not be saved."))
     # Save EVERY window before closing ANY window. A failed save touches no terminal.
     cars = [prepare_car(store, w, process_api) for w in windows]
@@ -689,7 +776,8 @@ def restore(store, iterm, process_api, car_id):
     missing = len(matches) != len(car["tabs"])
     if missing and set(car["source_session_ids"]) & open_ids:
         raise ParkError("Some original tabs are still open but not all saved conversations can be verified. Check iTerm before retrying. Nothing was duplicated.")
-    if missing and any(same_process(p, current.get(p["pid"])) for p in car["tracked_processes"]):
+    if missing and any(same_process(p, current.get(p["pid"]))
+                       for p in safe_tracked_processes(car["tracked_processes"], current)):
         raise ParkError("An original agent or tracked child process is still running. Nothing was duplicated.")
     pending = car.get("pending_tab")
     if pending is not None and str(pending) not in matches:
@@ -908,8 +996,64 @@ def remove_car(store, car_id):
     return {"message": ""}
 
 
+class TestWindowITerm(ITerm):
+    """Explicit test-only scope. No picker or changed defaults in production.
+
+    A manifest captures one disposable window's immutable session IDs. Recovery
+    is isolated beside it; only that window and its journaled returns may mutate.
+    """
+    def __init__(self, manifest, store):
+        self.manifest, self.store = manifest, store
+
+    def allowed(self):
+        result = {self.manifest["window_id"]: set(self.manifest["session_ids"])}
+        for car in self.store.cars()[0] + self.store.cars(archived=True)[0]:
+            for target in car["restored_targets"].values():
+                result.setdefault(target["window_id"], set()).add(target["terminal_id"])
+        return result
+
+    def windows(self):
+        allowed = self.allowed()
+        return [w for w in super().windows() if w["id"] in allowed and
+                {s["id"] for t in w["tabs"] for s in t["sessions"]} == allowed[w["id"]]]
+
+    def call(self, action, **kwargs):
+        if action != "list":
+            allowed = self.allowed()
+            requests = kwargs.get("titles", [kwargs])
+            for request in requests:
+                wid = request.get("windowId")
+                if action == "create" and wid is None:
+                    continue
+                ids = set(request.get("sessionIds", []))
+                if request.get("sessionId"):
+                    ids.add(request["sessionId"])
+                if wid not in allowed or not ids.issubset(allowed[wid]):
+                    raise ParkError("Test mode refused an operation outside the disposable window.")
+                # Never append to or focus a window that has acquired a real tab.
+                if wid not in {w["id"] for w in self.windows()}:
+                    raise ParkError("The disposable window's tabs changed. Test mode stopped.")
+        return super().call(action, **kwargs)
+
+
 def main(argv):
     store, iterm, process_api = Store(), ITerm(), Processes()
+    if argv[:1] == ["--test-scope"]:
+        if len(argv) < 2:
+            raise ParkError("Test mode requires a disposable-window manifest path.")
+        scope = Path(argv[1]).resolve()
+        manifest = json.loads(scope.read_text())
+        if (not isinstance(manifest, dict) or not isinstance(manifest.get("window_id"), str)
+                or not manifest["window_id"] or not isinstance(manifest.get("session_ids"), list)
+                or not manifest["session_ids"]
+                or not all(isinstance(s, str) and s for s in manifest["session_ids"])):
+            raise ParkError("Invalid disposable-window manifest.")
+        test_root = scope.parent / "garage"
+        if test_root.resolve() == ROOT.resolve():
+            raise ParkError("Test mode cannot use the production garage.")
+        store = Store(test_root)
+        iterm = TestWindowITerm(manifest, store)
+        argv = argv[2:]
     response = {"ok": True, "windows": [], "message": ""}
     try:
         action = argv[0] if argv else "list"

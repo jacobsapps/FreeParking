@@ -96,6 +96,24 @@ class CarParkTests(unittest.TestCase):
     def park(self):
         return cp.park(self.store, self.iterm, self.proc, "1", self.window["fingerprint"])
 
+    def test_thread_switch_after_save_never_interrupts_same_pid(self):
+        car = cp.prepare_car(self.store, self.window, self.proc)
+        changed = dict(self.window, tabs=[dict(self.tab, session_id='00000000-0000-4000-8000-000000000001')])
+        with patch.object(cp, 'discover', return_value=[changed]):
+            note = cp.close_saved_car(self.store, self.iterm, self.proc, car)
+        self.assertIn('conversation changed', note)
+        self.assertEqual(self.proc.signals, [])
+        self.assertNotIn('close', self.iterm.calls)
+        self.assertEqual(self.store.load(car['id'])['status'], 'attention')
+
+    def test_turn_started_after_save_never_interrupts(self):
+        car = cp.prepare_car(self.store, self.window, self.proc)
+        self.window['can_park'] = False
+        note = cp.close_saved_car(self.store, self.iterm, self.proc, car)
+        self.assertIn('started working', note)
+        self.assertEqual(self.proc.signals, [])
+        self.assertNotIn('close', self.iterm.calls)
+
     def parked_car(self):
         self.park()
         return self.store.cars()[0][0]

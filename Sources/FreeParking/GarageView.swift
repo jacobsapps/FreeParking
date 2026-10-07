@@ -75,6 +75,10 @@ struct GarageView: View {
             Text("FREE PARKING").font(ParkingStyle.signFont(28)).tracking(1.3)
             Spacer(minLength: 8)
             if garage.isPreview { SampleBadge() }
+            if LocalBackend.testScope != nil {
+                Text("TEST WINDOW").font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(ParkingStyle.yellow)
+            }
             Button { garage.scan() } label: { Image(systemName: "arrow.clockwise").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).disabled(garage.busy).help("Refresh window count")
                 .accessibilityLabel("Refresh window count")
