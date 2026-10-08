@@ -37,7 +37,7 @@ class PresentationTests(unittest.TestCase):
         self.assertFalse(saved['bounds_pending'])
         self.assertFalse(saved['restored_targets']['0']['title_pending'])
 
-    def test_many_tabs_resize_first_and_use_one_title_batch(self):
+    def test_all_tabs_launch_before_presentation_and_use_one_title_batch(self):
         bounds = dict(x=100, y=70, width=900, height=650)
         self.window['bounds'] = bounds
         car = self.parked_car()
@@ -60,10 +60,10 @@ class PresentationTests(unittest.TestCase):
             return {'ok': True}
         with patch.object(cp, 'discover', return_value=[]), patch.object(self.iterm, 'call', side_effect=call):
             cp.restore(self.store, self.iterm, self.proc, car['id'])
-        self.assertEqual(actions, ['create', 'set-bounds', 'create', 'create', 'create',
+        self.assertEqual(actions, ['create', 'create', 'create', 'create',
                                    'set-bounds', 'set-titles', 'focus'])
 
-    def test_failed_geometry_keeps_pending_and_does_not_set_titles(self):
+    def test_failed_geometry_keeps_pending_but_continues_titles_and_focus(self):
         self.window['bounds'] = dict(x=100, y=70, width=900, height=650)
         car = self.parked_car()
         original = self.iterm.call
@@ -71,12 +71,13 @@ class PresentationTests(unittest.TestCase):
             if action == 'set-bounds': return {'ok': True}  # Missing readback.
             return original(action, **kwargs)
         with patch.object(cp, 'discover', return_value=[]), patch.object(self.iterm, 'call', side_effect=call):
-            with self.assertRaisesRegex(cp.ParkError, 'could not be checked'):
-                cp.restore(self.store, self.iterm, self.proc, car['id'])
+            cp.restore(self.store, self.iterm, self.proc, car['id'])
         saved = self.store.load(car['id'])
         self.assertTrue(saved['bounds_pending'])
-        self.assertTrue(saved['restored_targets']['0']['title_pending'])
-        self.assertNotIn('set-titles', self.iterm.calls)
+        self.assertFalse(saved['restored_targets']['0']['title_pending'])
+        self.assertIn('set-titles', self.iterm.calls)
+        self.assertIn('focus', self.iterm.calls)
+        self.assertIn('could not be checked', saved['note'])
 
     def test_old_car_without_geometry_still_restores_saved_title(self):
         car = self.parked_car()
@@ -103,8 +104,7 @@ class PresentationTests(unittest.TestCase):
             if action == 'set-bounds': raise cp.ParkError('Frame not settled')
             return original(action, **kwargs)
         with patch.object(cp, 'discover', return_value=[]), patch.object(self.iterm, 'call', side_effect=fail_bounds):
-            with self.assertRaisesRegex(cp.ParkError, 'Frame not settled'):
-                cp.restore(self.store, self.iterm, self.proc, car['id'])
+            cp.restore(self.store, self.iterm, self.proc, car['id'])
         process = {**self.tab['process'], 'pid': 201, 'started': 'new process'}
         self.proc.running = {201: process}
         window = {**self.window, 'id': '2', 'tabs': [
@@ -112,7 +112,7 @@ class PresentationTests(unittest.TestCase):
         self.iterm.calls.clear()
         with patch.object(cp, 'discover', return_value=[window]):
             cp.restore(self.store, self.iterm, self.proc, car['id'])
-        self.assertEqual(self.iterm.calls, ['set-bounds', 'set-titles', 'focus'])
+        self.assertEqual(self.iterm.calls, ['set-bounds', 'focus'])
         self.assertFalse(self.store.load(car['id'])['bounds_pending'])
 
     def test_title_failure_is_journaled_then_retried_without_duplicate_launch(self):
@@ -123,11 +123,15 @@ class PresentationTests(unittest.TestCase):
                 raise cp.ParkError('Title not written')
             return original(action, **kwargs)
         with patch.object(cp, 'discover', return_value=[]), patch.object(self.iterm, 'call', side_effect=fail_title):
-            with self.assertRaisesRegex(cp.ParkError, 'Title not written'):
-                cp.restore(self.store, self.iterm, self.proc, car['id'])
+            cp.restore(self.store, self.iterm, self.proc, car['id'])
         saved = self.store.load(car['id'])
         self.assertTrue(saved['restored_targets']['0']['title_pending'])
         self.assertIsNone(saved['pending_tab'])
+        self.assertEqual(saved['status'], 'restored')
+        self.assertIn('Tab names: Title not written', saved['note'])
+        with self.assertRaises(cp.ReturnNotVerified):
+            cp.verify_return(saved, self.iterm, self.proc)
+        self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [])
         process = {**self.tab['process'], 'pid': 201, 'started': 'new process'}
         self.proc.running = {201: process}
         window = {**self.window, 'id': '2', 'tabs': [{**self.tab, 'terminal_id': 'restored-fixture', 'process': process}]}
@@ -151,6 +155,84 @@ class PresentationTests(unittest.TestCase):
             cp.open_car(self.store, self.iterm, self.proc, car['id'])
         self.assertEqual(self.store.load(car['id'])['status'], 'archived')
 
+    def test_refresh_acknowledges_legacy_completed_launches_despite_title_failure(self):
+        car, window = self.awaiting_confirmation()
+        saved = self.store.load(car['id'])
+        saved['status'] = 'restoring'
+        saved['note'] = 'Restoring tab 1. Recovery information is retained.'
+        saved['restored_targets']['0']['title_pending'] = True
+        self.store.save(saved)
+        self.iterm.calls.clear()
+        with patch.object(cp, 'discover', return_value=[window]):
+            archived = cp.archive_verified_returns(self.store, self.iterm, self.proc)
+        self.assertEqual(archived, [car['id']])
+        self.assertEqual(self.iterm.calls, [])  # No create, title, focus, or close.
+        saved = self.store.load(car['id'])
+        self.assertEqual(saved['removal_basis'], 'verified_live_return')
+        self.assertTrue(saved['restored_targets']['0']['title_pending'])
+        self.assertIn('not confirmed', saved['note'])
+        self.assertEqual(saved['tabs'], car['tabs'])
+
+    def test_title_exception_does_not_skip_live_identity_verification(self):
+        car, window = self.awaiting_confirmation()
+        saved = self.store.load(car['id'])
+        saved['restored_targets']['0']['title_pending'] = True
+        self.store.save(saved)
+        original = self.iterm.call
+        def fail_title(action, **kwargs):
+            if action == 'set-titles': raise cp.ParkError('Title readback late')
+            return original(action, **kwargs)
+        with patch.object(cp, 'discover', return_value=[window]), patch.object(self.iterm, 'call', side_effect=fail_title):
+            result = cp.open_car(self.store, self.iterm, self.proc, car['id'])
+        self.assertEqual(result['verified_archived_ids'], [car['id']])
+        self.assertEqual(self.store.load(car['id'])['status'], 'archived')
+
+    def test_legacy_receipts_do_not_acknowledge_missing_or_changed_sessions(self):
+        car, window = self.awaiting_confirmation()
+        for reason in ('missing', 'wrong-session', 'wrong-folder', 'duplicate', 'process-changed'):
+            with self.subTest(reason=reason):
+                saved = self.store.load(car['id'])
+                saved['status'] = 'restoring'
+                saved['restored_targets']['0']['title_pending'] = True
+                self.store.save(saved)
+                tab = dict(window['tabs'][0])
+                live = [{**window, 'tabs': [tab]}]
+                if reason == 'missing': live = []
+                if reason == 'wrong-session': tab['session_id'] = '00000000-0000-4000-8000-000000000099'
+                if reason == 'wrong-folder': tab['cwd'] = '/wrong-folder'
+                if reason == 'duplicate': live.append({**window, 'id': '3', 'tabs': [{**tab, 'terminal_id': 'duplicate'}]})
+                if reason == 'process-changed': tab['process'] = {**tab['process'], 'started': 'different birth'}
+                with patch.object(cp, 'discover', return_value=live):
+                    self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc, {car['id']}), [])
+                self.assertEqual(self.store.load(car['id'])['status'], 'restoring')
+
+    def test_legacy_missing_receipts_reconcile_only_when_every_conversation_is_live(self):
+        car, window = self.awaiting_confirmation()
+        saved = self.store.load(car['id'])
+        for pending in (0, None):
+            saved.update(status='attention', pending_tab=pending, restored_targets={})
+            self.store.save(saved)
+            with patch.object(cp, 'discover', return_value=[]):
+                self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [])
+            with patch.object(cp, 'discover', return_value=[window]):
+                self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [car['id']])
+            self.assertEqual(self.store.load(car['id'])['status'], 'archived')
+            self.assertEqual(self.store.load(car['id'])['removal_basis'], 'verified_live_return')
+
+    def test_legacy_title_failure_does_not_bypass_permission_or_order_checks(self):
+        car, window = self.awaiting_confirmation()
+        saved = self.store.load(car['id'])
+        saved['status'] = 'restoring'
+        saved['restored_targets']['0']['title_pending'] = True
+        self.store.save(saved)
+        with patch.object(cp, 'discover', side_effect=cp.AutomationPermissionError('Denied')):
+            with self.assertRaises(cp.AutomationPermissionError):
+                cp.archive_verified_returns(self.store, self.iterm, self.proc)
+        self.iterm.raw[0]['tabs'][0]['sessions'].append({'id': 'split'})
+        with patch.object(cp, 'discover', return_value=[window]):
+            self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [])
+        self.assertEqual(self.store.load(car['id'])['status'], 'restoring')
+
     def test_unverified_return_keeps_car_even_after_retry_limit(self):
         car, _ = self.awaiting_confirmation()
         with patch.object(cp, 'discover', return_value=[]):
@@ -164,12 +246,12 @@ class PresentationTests(unittest.TestCase):
             with self.assertRaisesRegex(cp.ReturnNotVerified, 'more than once'):
                 cp.verify_return(self.store.load(car['id']), self.iterm, self.proc)
 
-    def test_extra_tabs_prevent_autoarchive(self):
+    def test_extra_unrelated_tabs_do_not_prevent_autoarchive(self):
         car, window = self.awaiting_confirmation()
         self.iterm.raw[0]['tabs'].append({'sessions': [{'id': 'extra'}]})
         with patch.object(cp, 'discover', return_value=[window]):
-            self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [])
-        self.assertEqual(self.store.load(car['id'])['status'], 'restored')
+            self.assertEqual(cp.archive_verified_returns(self.store, self.iterm, self.proc), [car['id']])
+        self.assertEqual(self.store.load(car['id'])['status'], 'archived')
 
     def test_permission_failure_is_not_a_verified_return(self):
         car, _ = self.awaiting_confirmation()
@@ -206,41 +288,22 @@ class ConcurrentDiscoveryTests(unittest.TestCase):
                          [['0-0', '0-1'], ['1-0', '1-1']])
 
 
-class OptionalCloseTests(unittest.TestCase):
-    def test_missing_runtime_uses_normal_iterm_confirmation(self):
-        with patch.object(cp, 'iterm_python_runtime', return_value=None), patch.object(cp, 'run', return_value='{"ok":true}') as run:
+class NormalCloseTests(unittest.TestCase):
+    def test_close_never_uses_optional_api_or_timeout(self):
+        with patch.object(cp, 'iterm_python_runtime') as runtime, patch.object(cp, 'run', return_value='{"ok":true}') as run:
             cp.ITerm().call('close', windowId='fixture-window', sessionIds=['fixture-session'])
-        self.assertEqual(len(run.call_args_list), 2)  # check, normal close
-        self.assertIn('"action": "close"', run.call_args_list[-1].args[0][-1])
+        runtime.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][0], '/usr/bin/osascript')
+        self.assertIsNone(run.call_args.kwargs['timeout'])
+        self.assertIn('"action": "close"', run.call_args.args[0][-1])
 
-    def test_api_success_does_not_send_a_second_close(self):
-        with patch.object(cp, 'iterm_python_runtime', return_value=Path('/fixture/python')), patch.object(cp, 'run', side_effect=['{"ok":true}', '{"state":"closed"}']) as run:
-            cp.ITerm().call('close', windowId='fixture-window', sessionIds=['fixture-session'])
-        self.assertEqual(len(run.call_args_list), 2)
-        self.assertEqual(run.call_args_list[-1].args[0][0], '/fixture/python')
-
-    def test_ambiguous_api_failure_never_retries_via_applescript(self):
-        with patch.object(cp, 'iterm_python_runtime', return_value=Path('/fixture/python')), patch.object(cp, 'run', side_effect=['{"ok":true}', '{"state":"error","error":"Uncertain"}']) as run:
+    def test_ambiguous_close_is_never_replayed(self):
+        with patch.object(cp, 'run', side_effect=cp.ParkError('Uncertain')) as run:
             with self.assertRaisesRegex(cp.ParkError, 'Uncertain'):
                 cp.ITerm().call('close', windowId='fixture-window', sessionIds=['fixture-session'])
-        self.assertEqual(len(run.call_args_list), 2)
+        run.assert_called_once()
 
-    def test_unavailable_api_falls_back_to_normal_close(self):
-        with patch.object(cp, 'iterm_python_runtime', return_value=Path('/fixture/python')), patch.object(cp, 'run', side_effect=['{"ok":true}', '{"state":"unavailable"}', '{"ok":true}']) as run:
-            cp.ITerm().call('close', windowId='fixture-window', sessionIds=['fixture-session'])
-        self.assertEqual(len(run.call_args_list), 3)
-
-    def test_api_target_requires_exact_order_no_splits_and_only_one_window(self):
-        from types import SimpleNamespace as S
-        spec = importlib.util.spec_from_file_location('close_helper', Path(cp.__file__).with_name('iterm_api.py'))
-        helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
-        window = S(tabs=[S(all_sessions=[S(session_id='a')]), S(all_sessions=[S(session_id='b')])])
-        app = S(terminal_windows=[window])
-        self.assertIs(helper.matching_window(app, ['a', 'b']), window)
-        for ids in ([], ['a'], ['b', 'a'], ['a', 'a']):
-            with self.assertRaises(ValueError): helper.matching_window(app, ids)
-        window.tabs[0].all_sessions.append(S(session_id='split'))
-        with self.assertRaises(ValueError): helper.matching_window(app, ['a', 'b'])
 
 class APIHelperTests(unittest.TestCase):
     def setUp(self):
@@ -260,7 +323,7 @@ class APIHelperTests(unittest.TestCase):
             self.assertTrue(self.in_transaction)
             self.calls.append(('close', force))
         self.tab = S(all_sessions=[S(session_id='fixture')], async_set_title=set_title, async_get_variable=get_variable)
-        window = S(tabs=[self.tab], async_close=close)
+        window = S(window_id="test-window", tabs=[self.tab], async_close=close)
         async def refresh(): self.calls.append(('refresh', self.in_transaction))
         app = S(terminal_windows=[window], async_refresh=refresh)
         self.window = window
@@ -319,6 +382,34 @@ class APIHelperTests(unittest.TestCase):
         result = self.invoke({'action': 'set-title', 'sessionId': 'fixture', 'title': 'Different'})
         self.assertEqual(result['state'], 'error')
 
+    def test_delayed_title_readback_retries_reads_not_writes(self):
+        from unittest.mock import AsyncMock
+        reads = []
+        async def get_variable(key):
+            reads.append(key)
+            return self.title if len(reads) == 3 else 'Previous title'
+        self.tab.async_get_variable = get_variable
+        with patch.object(self.helper.asyncio, 'sleep', new_callable=AsyncMock) as sleep:
+            result = self.invoke({'action': 'set-title', 'sessionId': 'fixture', 'title': self.title})
+        self.assertEqual(result['state'], 'updated')
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(sleep.await_count, 2)
+
+    def test_readback_retries_are_bounded_and_never_assume_success(self):
+        from unittest.mock import AsyncMock
+        reads = []
+        async def get_variable(key):
+            reads.append(key)
+            return 'Still wrong'
+        self.tab.async_get_variable = get_variable
+        with patch.object(self.helper.asyncio, 'sleep', new_callable=AsyncMock) as sleep:
+            result = self.invoke({'action': 'set-title', 'sessionId': 'fixture', 'title': self.title})
+        self.assertEqual(result['state'], 'error')
+        self.assertEqual(len(reads), 6)
+        self.assertEqual(sleep.await_count, 5)
+        self.assertEqual(len(self.calls), 1)
+
     def test_title_never_targets_an_unknown_session(self):
         result = self.invoke({'action': 'set-title', 'sessionId': 'other', 'title': self.title})
         self.assertEqual(result['state'], 'error')
@@ -366,15 +457,16 @@ class APIHelperTests(unittest.TestCase):
             self.assertEqual(result['state'], 'error')
             self.assertEqual(self.calls, [])
 
-    def test_close_refreshes_and_verifies_in_transaction(self):
-        result = self.invoke({'action': 'close', 'sessionIds': ['fixture']})
-        self.assertEqual(result['state'], 'closed')
-        self.assertEqual(self.calls, [('refresh', True), ('close', True)])
-
-    def test_changed_tabs_never_close(self):
-        result = self.invoke({'action': 'close', 'sessionIds': ['other']})
+    def test_title_session_moved_to_another_window_is_not_modified(self):
+        result = self.invoke({'action':'set-titles', 'titles':[
+            {'windowId':'different-window', 'sessionId':'fixture', 'title':self.title}]})
         self.assertEqual(result['state'], 'error')
-        self.assertEqual(self.calls, [('refresh', True)])
+        self.assertEqual(self.calls, [])
+
+    def test_sdk_close_is_rejected_without_connecting(self):
+        result = self.invoke({'action': 'close', 'sessionIds': ['fixture']})
+        self.assertEqual(result['state'], 'error')
+        self.assertEqual(self.calls, [])
 
     def test_unknown_action_never_connects_or_closes(self):
         result = self.invoke({'sessionIds': ['fixture']})

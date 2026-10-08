@@ -36,6 +36,34 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
     let tabs: [AgentTab]
     let filePath: String
     var windowTitle: String? = nil
+    var restoredTargets: [String: RestoredTarget]? = nil
+    var pendingTab: Int? = nil
+    var boundsPending: Bool? = nil
+
+    struct RestoredTarget: Decodable, Sendable {
+        let windowId: String
+        let terminalId: String
+        var titlePending: Bool? = nil
+    }
+
+    /// Launch acknowledgements are not proof of a live conversation. They do
+    /// distinguish a later presentation/check failure from an incomplete launch.
+    var allLaunchesRecorded: Bool {
+        guard ["restoring", "restored", "attention"].contains(status), pendingTab == nil,
+              !tabs.isEmpty, let restoredTargets,
+              restoredTargets.count == tabs.count else { return false }
+        return tabs.indices.allSatisfy {
+            guard let target = restoredTargets[String($0)] else { return false }
+            return !target.windowId.isEmpty && !target.terminalId.isEmpty
+        }
+    }
+    var awaitingTabNames: Bool {
+        allLaunchesRecorded && boundsPending != true &&
+            (restoredTargets?.values.contains { $0.titlePending == true } ?? false)
+    }
+    var tabNamesHelp: String {
+        tabs.enumerated().map { "\($0.offset + 1). \($0.element.displayTitle)" }.joined(separator: "\n")
+    }
 
     var displayTitle: String {
         if let windowTitle, !windowTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return windowTitle }
@@ -44,20 +72,22 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
 
     var date: Date { ISO8601DateFormatter().date(from: createdAt) ?? .distantPast }
     var statusLabel: String {
+        if allLaunchesRecorded { return "Opened · awaiting check" }
         switch status {
         case "parked": return "Parked"
-        case "restored": return "Awaiting verification"
+        case "restored": return "Opened · awaiting check"
         case "saved_open": return "Saved · still open"
-        case "restoring": return "Restore interrupted"
+        case "restoring": return allLaunchesRecorded ? "Opened · awaiting check" : "Restore interrupted"
         default: return "Needs attention"
         }
     }
-    var needsAttention: Bool { !["parked", "restored"].contains(status) }
-    var hasReturned: Bool { status == "restored" }
+    var needsAttention: Bool { !["parked", "restored"].contains(status) && !allLaunchesRecorded }
+    var hasReturned: Bool { status == "restored" || allLaunchesRecorded }
     var commands: String { tabs.compactMap(\.resumeCommand).joined(separator: "\n\n") }
 
     func withStatus(_ status: String, note: String) -> ParkedCar {
-        ParkedCar(id: id, createdAt: createdAt, status: status, note: note, tabs: tabs, filePath: filePath, windowTitle: windowTitle)
+        ParkedCar(id: id, createdAt: createdAt, status: status, note: note, tabs: tabs, filePath: filePath, windowTitle: windowTitle,
+                  restoredTargets: restoredTargets, pendingTab: pendingTab, boundsPending: boundsPending)
     }
 }
 
@@ -183,7 +213,9 @@ final class Garage: ObservableObject {
     func issue(for car: ParkedCar) -> CarIssue? {
         if let issue = carIssues[car.id] { return issue }
         guard car.needsAttention, activeCarID != car.id else { return nil }
-        return CarIssue(summary: car.status == "saved_open" ? "Window still open" : "Opening incomplete",
+        let parkingIncomplete = car.status == "saved_open" ||
+            ((car.restoredTargets?.isEmpty ?? true) && car.pendingTab == nil && car.status != "restoring")
+        return CarIssue(summary: parkingIncomplete ? "Parking incomplete" : "Opening incomplete",
                         detail: car.note)
     }
 
@@ -386,7 +418,7 @@ final class Garage: ObservableObject {
             }
             if let failure {
                 if let carID {
-                    carIssues[carID] = CarIssue(summary: removingCar ? "Couldn’t archive car" : "Couldn’t open all tabs",
+                    carIssues[carID] = CarIssue(summary: removingCar ? "Couldn’t archive car" : "Couldn’t finish reopening",
                                                detail: failure)
                 } else if problem == nil { problem = failure }
                 else if problem != failure { problem = [problem!, failure].joined(separator: "\n") }

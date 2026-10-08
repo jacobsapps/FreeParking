@@ -144,7 +144,7 @@ private struct ParkedBay: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Not yet verified" : "")
+                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Opened · awaiting check" : "")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(ParkingStyle.secondary)
                 Spacer(minLength: 0)
                 Button { showingActions.toggle() } label: {
@@ -177,7 +177,7 @@ private struct ParkedBay: View {
             .contentShape(Rectangle())
             .onTapGesture(count: 1) { garage.open(car) }
             .onHover { value in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { hovered = value } }
-            .help("Click to reopen this window in iTerm. If already open, bring it forward.")
+            .help(car.tabNamesHelp + "\n\nClick to reopen this window in iTerm.")
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(car.date.formatted()), \(car.tabs.count) tabs, \(car.statusLabel)")
             .accessibilityAddTraits(.isButton)
@@ -188,7 +188,7 @@ private struct ParkedBay: View {
             .onKeyPress(.space) { garage.open(car); return .handled }
 
             Text(car.displayTitle).font(.system(size: 11, weight: .medium))
-                .lineLimit(1).help(car.displayTitle)
+                .lineLimit(1).help(car.tabNamesHelp)
             if car.hasReturned {
                 Button("Check again") { garage.open(car) }
                     .accessibilityIdentifier("check-car-" + car.id)

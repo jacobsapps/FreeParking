@@ -8,6 +8,7 @@ No agents, hooks, preferences, Accessibility, shell history, or network services
 from __future__ import annotations
 
 import contextlib
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import fcntl
@@ -68,9 +69,7 @@ def run(args, timeout=20, input=None):
 
 class ITerm:
     def call(self, action, **kwargs):
-        if action in ("close", "set-title", "set-titles"):
-            if action == "close":
-                self.call("check", **kwargs)
+        if action in ("set-title", "set-titles"):
             runtime = iterm_python_runtime()
             if runtime:
                 # Only use an API the user already enabled. Never turn it on,
@@ -80,11 +79,14 @@ class ITerm:
                                   json.dumps({"action": action, **kwargs})], timeout=30)
                     reply = json.loads(output)
                 except Exception as error:
-                    raise ParkError("The iTerm operation did not finish. Recovery is kept; check iTerm before retrying.") from error
-                if reply.get("state") == ("closed" if action == "close" else "updated"):
+                    raise ParkError("iTerm " + action + " did not finish: " + str(error) + ". Recovery is kept.") from error
+                if reply.get("state") == "updated":
                     return {"ok": True}
                 if reply.get("state") != "unavailable":
                     raise ParkError(reply.get("error", "The saved window changed. Nothing else was closed."))
+        # Window closure always uses the normal iTerm confirmation path. The
+        # optional title SDK must never force-close a terminal or time out a
+        # user confirmation. iterm.js rechecks the exact window at close time.
         request = json.dumps({"action": action, **kwargs})
         # The close confirmation is the user's to answer, not a timer's.
         timeout = None if action == "close" else 45
@@ -616,6 +618,17 @@ def launch_command(tab):
 
 
 def prepare_car(store, window, process_api):
+    # A stopped batch leaves durable saves for untouched windows. Reuse only
+    # an exact original snapshot; never overwrite a different conversation.
+    existing, warnings = store.cars()
+    if warnings:
+        raise ParkError("A recovery file needs attention. Nothing closed. " + " ".join(warnings))
+    for saved in existing:
+        if (saved["status"] in ("saved_open", "attention")
+                and not saved["restored_targets"] and saved.get("pending_tab") is None
+                and saved["source_window_id"] == window["id"]
+                and fingerprint(saved) == fingerprint(window)):
+            return saved
     roots = [t["process"] for t in window["tabs"] if t["provider"] != "shell"]
     helpers = [p for t in window["tabs"] for p in t.get("auxiliary_processes", [])]
     car = {
@@ -664,15 +677,30 @@ def close_saved_car(store, iterm, process_api, car):
         # SIGINT can make every agent exit, and iTerm may then close the
         # window itself. Do not target its retained Undo-window object.
         source_ids = set(car["source_session_ids"])
-        after_interrupt = {s["id"] for w in iterm.windows() for t in w["tabs"] for s in t["sessions"]}
+        raw = iterm.windows()
+        after_interrupt = {s["id"] for w in raw for t in w["tabs"] for s in t["sessions"]}
         if source_ids & after_interrupt:
-            iterm.call("close", **args)  # Adapter rechecks the full ordered list.
-        # Cancellation on the normal AppleScript fallback means no further
-        # termination. The optional API skips only this saved window's prompt;
-        # neither path changes the user's ordinary confirmation preferences.
-        source_ids = set(car["source_session_ids"])
+            # Individual tabs may exit on SIGINT. Close only the survivors, in
+            # their original window and order; never a moved tab or a new tab.
+            surviving = [sid for sid in car["source_session_ids"] if sid in after_interrupt]
+            window = next((w for w in raw if w["id"] == car["source_window_id"]), None)
+            actual = ([t["sessions"][0]["id"] for t in window["tabs"]
+                       if len(t["sessions"]) == 1] if window else [])
+            if (not window or any(len(t["sessions"]) != 1 for t in window["tabs"])
+                    or actual != surviving):
+                raise ParkError("The saved window changed after interruption. No further window was closed.")
+            try:
+                iterm.call("close", windowId=car["source_window_id"], sessionIds=surviving)
+            except Exception:
+                # An RPC error is not proof the close failed. Observe once; do
+                # not send another close or suppress failure while tabs remain.
+                remaining = {s["id"] for w in iterm.windows() for t in w["tabs"] for s in t["sessions"]}
+                if source_ids & remaining:
+                    raise
+        # Cancellation means no further termination. Never bypass confirmation.
         remaining_ids = {s["id"] for w in iterm.windows() for t in w["tabs"] for s in t["sessions"]}
         if source_ids & remaining_ids:
+            car["status"] = "saved_open"
             car["note"] = "Saved, but the window was not closed. Agents may have been interrupted. No further processes were stopped."
         else:
             # iTerm can retain closed sessions for Undo. Explicitly terminate
@@ -816,8 +844,6 @@ def restore(store, iterm, process_api, car_id):
         car["pending_tab"] = None
         opened += 1
         store.save(car)
-        if opened == 1 and car.get("bounds_pending"):
-            restore_window_bounds(store, iterm, car)
 
     # Already-open conversations are brought forward, not duplicated. Select
     # the exact windows, verifying their recorded tab IDs again in the adapter.
@@ -832,7 +858,17 @@ def restore(store, iterm, process_api, car_id):
     if opened and len(by_window.get(window_id, [])) > 1 and car.get("created_window_id") == window_id and car.get("window_bounds"):
         car["bounds_pending"] = True
         store.save(car)
-    restore_window_bounds(store, iterm, car)
+    # All launch receipts are durable before any optional presentation work.
+    # A failed resize/title/focus must not strand later tabs or look like a
+    # failed launch. Retain the pending flags for a subsequent explicit retry.
+    car["status"] = "restored"
+    car["note"] = "Tab launches completed. Waiting to identify every saved conversation."
+    store.save(car)
+    presentation_errors = []
+    try:
+        restore_window_bounds(store, iterm, car)
+    except Exception as error:
+        presentation_errors.append("Window layout: " + str(error))
     pending_titles = [{"windowId": targets[str(index)]["window_id"],
                        "sessionId": targets[str(index)]["terminal_id"], "title": tab["title"]}
                       for index, tab in enumerate(car["tabs"]) if targets[str(index)].get("title_pending")]
@@ -840,15 +876,23 @@ def restore(store, iterm, process_api, car_id):
         # One connection/runtime startup for the whole window, not one per tab.
         # Partial failure retains all flags: setting an exact tab's title again
         # is harmless, and retrying must never launch another session.
-        iterm.call("set-titles", titles=pending_titles)
-        for target in targets.values():
-            target["title_pending"] = False
-        store.save(car)
+        try:
+            iterm.call("set-titles", titles=pending_titles)
+        except Exception as error:
+            presentation_errors.append("Tab names: " + str(error))
+        else:
+            for target in targets.values():
+                target["title_pending"] = False
+            store.save(car)
     for window_id, terminal_ids in reversed(list(by_window.items())):
-        iterm.call("focus", windowId=window_id, sessionIds=terminal_ids)
-    car["status"] = "restored"
+        try:
+            iterm.call("focus", windowId=window_id, sessionIds=terminal_ids)
+        except Exception as error:
+            presentation_errors.append("Bringing window forward: " + str(error))
     car["note"] = ("Opened " + str(opened) + " tabs. Waiting to identify every saved conversation."
-                   if opened else "Your conversations are already open. Their windows were brought forward.")
+                   if opened else "Your conversations are already open.")
+    if presentation_errors:
+        car["note"] += " Appearance not confirmed: " + "; ".join(presentation_errors)
     store.save(car)
     return car["note"]
 
@@ -870,16 +914,22 @@ def restore_window_bounds(store, iterm, car):
     store.save(car)
 
 
-def verify_return(car, iterm, process_api):
+def verify_return(car, iterm, process_api, live=None):
     """Read-only check. Permission/IO failures propagate, never mean 'not open'.
 
     A terminal alone is not proof: match this car's exact window/tab, provider,
     session, cwd and process identity. This is a point-in-time check.
     """
-    if (car["status"] != "restored" or car.get("pending_tab") is not None or not car["tabs"]
-            or car.get("bounds_pending") or any(t.get("title_pending") for t in car["restored_targets"].values())):
+    # Presentation is best-effort, not conversation identity. Older journals
+    # stayed "restoring" after every launch when a title RPC/readback failed.
+    # Reconcile those too, but only if every launch receipt exists and no launch
+    # is ambiguous. All live session/process/order checks below remain mandatory.
+    if (car["status"] not in ("restored", "restoring")
+            or car.get("pending_tab") is not None or not car["tabs"]
+            or set(car["restored_targets"]) != {str(i) for i in range(len(car["tabs"]))}):
         raise ReturnNotVerified("This car has not finished opening. It has been kept.")
-    live = discover(iterm, process_api)
+    if live is None:
+        live = discover(iterm, process_api)
     roots, expected = [], []
     used = set()
     for index, saved in enumerate(car["tabs"]):
@@ -915,26 +965,65 @@ def verify_return(car, iterm, process_api):
         raise ReturnNotVerified("A restored session closed or changed during the check. The car has been kept.")
     window_ids = {w for w, _ in expected}
     window = next((w for w in raw if w["id"] in window_ids), None)
+    expected_ids = [sid for _, sid in expected]
+    # Added tabs belong to the user, not this restore. They must not make a
+    # completed return fail; only the saved tabs' relative order/grouping matters.
     if (len(window_ids) != 1 or window is None
-            or [t["sessions"][0]["id"] for t in window["tabs"] if len(t["sessions"]) == 1]
-            != [sid for _, sid in expected]
-            or len(window["tabs"]) != len(expected)):
-        raise ReturnNotVerified("The returned window no longer has the exact saved tab order and grouping. The car has been kept.")
+            or [t["sessions"][0]["id"] for t in window["tabs"]
+                if len(t["sessions"]) == 1 and t["sessions"][0]["id"] in expected_ids]
+            != expected_ids):
+        raise ReturnNotVerified("The returned window no longer preserves the saved tab order and grouping. The car has been kept.")
+
+
+def reconciled_return(car, iterm, process_api, live=None):
+    """Read-only recovery across ALL phases, including old interrupted journals.
+
+    Resolve exact saved conversations, never infer success from RPC receipts or
+    titles. A pending launch may be acknowledged only when all identities are
+    present and pass the same independent final verification as a new return.
+    """
+    candidate = copy.deepcopy(car)
+    if live is None:
+        live = discover(iterm, process_api)
+    raw = iterm.windows()
+    present = {s["id"] for w in raw for t in w["tabs"] for s in t["sessions"]}
+    targets = {}
+    for index, saved in enumerate(car["tabs"]):
+        recorded = car["restored_targets"].get(str(index), {})
+        shell_ids = {saved["terminal_id"], recorded.get("terminal_id")}
+        matches = [(w["id"], t) for w in live for t in w["tabs"]
+                   if (t["provider"] == "shell" and t["terminal_id"] in shell_ids
+                       if saved["provider"] == "shell" else
+                       (t["provider"], t["session_id"]) == (saved["provider"], saved["session_id"]))]
+        if len(matches) != 1:
+            raise ReturnNotVerified("Not every saved conversation is uniquely identifiable yet.")
+        wid, tab = matches[0]
+        identity = {"window_id": wid, "terminal_id": tab["terminal_id"]}
+        if recorded.get("terminal_id") in present and any(recorded.get(k) != v for k, v in identity.items()):
+            raise ReturnNotVerified("A recorded tab is still open with a different identity.")
+        targets[str(index)] = {**recorded, **identity}
+    candidate.update(status="restored", restored_targets=targets, pending_tab=None)
+    verify_return(candidate, iterm, process_api, live=live)
+    return candidate
 
 
 def archive_verified_returns(store, iterm, process_api, car_ids=None, attempts=1):
     """Only successful identity checks retire a car. Launch success is not proof."""
     cars, _ = store.cars()
-    pending = [car for car in cars if car["status"] == "restored"
-               and (car_ids is None or car["id"] in car_ids)]
+    pending = [car for car in cars if car_ids is None or car["id"] in car_ids]
     archived = []
     for attempt in range(attempts):
+        if not pending:
+            break
+        # Resolve the live process/transcript snapshot once per pass, not twice
+        # per car. Each verification still rechecks raw tabs and process births.
+        live = discover(iterm, process_api)
         for car in list(pending):
             try:
-                verify_return(car, iterm, process_api)
+                verified = reconciled_return(car, iterm, process_api, live=live)
             except ReturnNotVerified:
                 continue
-            archive_car(store, car, verified=True)
+            archive_car(store, verified, verified=True)
             archived.append(car["id"])
             pending.remove(car)
         if not pending:
@@ -945,7 +1034,18 @@ def archive_verified_returns(store, iterm, process_api, car_ids=None, attempts=1
 
 
 def open_car(store, iterm, process_api, car_id):
-    restore(store, iterm, process_api, car_id)
+    try:
+        restore(store, iterm, process_api, car_id)
+    except AutomationPermissionError:
+        raise
+    except ParkError:
+        # A lost create receipt can still leave every exact conversation open.
+        # Reconcile, never replay a launch. Preserve the actual error unless the
+        # independent live verification proves the complete return.
+        archived = archive_verified_returns(store, iterm, process_api, {car_id}, attempts=6)
+        if archived:
+            return {"verified_archived_ids": archived, "message": ""}
+        raise
     archived = archive_verified_returns(store, iterm, process_api, {car_id}, attempts=6)
     return {"verified_archived_ids": archived,
             "message": "" if archived else "Window opened; the car stays until every saved tab is identified."}
@@ -976,6 +1076,9 @@ def archive_car(store, car, verified):
     car["removal_basis"] = "verified_live_return" if verified else "manual_archive"
     car["note"] = ("All saved sessions were identified in their open tabs. Recovery backup retained."
                    if verified else "Manually archived. Recovery backup retained; no terminal windows were changed.")
+    if verified and (car.get("bounds_pending") or any(
+            t.get("title_pending") for t in car["restored_targets"].values())):
+        car["note"] += " Saved tab names or window layout were not confirmed; this did not prevent session verification."
     store.save(car)
     return "Car removed from the garage. Its recovery backup is kept."
 
@@ -996,63 +1099,20 @@ def remove_car(store, car_id):
     return {"message": ""}
 
 
-class TestWindowITerm(ITerm):
-    """Explicit test-only scope. No picker or changed defaults in production.
-
-    A manifest captures one disposable window's immutable session IDs. Recovery
-    is isolated beside it; only that window and its journaled returns may mutate.
-    """
-    def __init__(self, manifest, store):
-        self.manifest, self.store = manifest, store
-
-    def allowed(self):
-        result = {self.manifest["window_id"]: set(self.manifest["session_ids"])}
-        for car in self.store.cars()[0] + self.store.cars(archived=True)[0]:
-            for target in car["restored_targets"].values():
-                result.setdefault(target["window_id"], set()).add(target["terminal_id"])
-        return result
-
-    def windows(self):
-        allowed = self.allowed()
-        return [w for w in super().windows() if w["id"] in allowed and
-                {s["id"] for t in w["tabs"] for s in t["sessions"]} == allowed[w["id"]]]
-
-    def call(self, action, **kwargs):
-        if action != "list":
-            allowed = self.allowed()
-            requests = kwargs.get("titles", [kwargs])
-            for request in requests:
-                wid = request.get("windowId")
-                if action == "create" and wid is None:
-                    continue
-                ids = set(request.get("sessionIds", []))
-                if request.get("sessionId"):
-                    ids.add(request["sessionId"])
-                if wid not in allowed or not ids.issubset(allowed[wid]):
-                    raise ParkError("Test mode refused an operation outside the disposable window.")
-                # Never append to or focus a window that has acquired a real tab.
-                if wid not in {w["id"] for w in self.windows()}:
-                    raise ParkError("The disposable window's tabs changed. Test mode stopped.")
-        return super().call(action, **kwargs)
-
-
 def main(argv):
     store, iterm, process_api = Store(), ITerm(), Processes()
     if argv[:1] == ["--test-scope"]:
         if len(argv) < 2:
             raise ParkError("Test mode requires a disposable-window manifest path.")
         scope = Path(argv[1]).resolve()
-        manifest = json.loads(scope.read_text())
-        if (not isinstance(manifest, dict) or not isinstance(manifest.get("window_id"), str)
-                or not manifest["window_id"] or not isinstance(manifest.get("session_ids"), list)
-                or not manifest["session_ids"]
-                or not all(isinstance(s, str) and s for s in manifest["session_ids"])):
-            raise ParkError("Invalid disposable-window manifest.")
+        from test_safety import Scope, ScopedTerminal, ScopedProcesses
+        boundary = Scope(scope)  # Old scopes without a protected baseline fail.
         test_root = scope.parent / "garage"
-        if test_root.resolve() == ROOT.resolve():
+        if test_root.resolve() == ROOT.resolve() or ROOT.resolve() in test_root.resolve().parents:
             raise ParkError("Test mode cannot use the production garage.")
         store = Store(test_root)
-        iterm = TestWindowITerm(manifest, store)
+        iterm = ScopedTerminal(boundary, iterm)
+        process_api = ScopedProcesses(boundary, iterm, process_api)
         argv = argv[2:]
     response = {"ok": True, "windows": [], "message": ""}
     try:

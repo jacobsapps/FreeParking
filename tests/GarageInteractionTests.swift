@@ -22,6 +22,35 @@ struct GarageInteractionTests {
         garage.load()
         garage.cars = [a, b]
 
+        // Legacy recovery journals can record every launch and still say
+        // "restoring" when only title readback failed. Do not report missing tabs.
+        var pendingTitles = a.withStatus("restoring", note: "Restoring tab 3.")
+        pendingTitles.restoredTargets = Dictionary(uniqueKeysWithValues: a.tabs.indices.map {
+            (String($0), ParkedCar.RestoredTarget(windowId: "fixture-window", terminalId: "fixture-\($0)", titlePending: true))
+        })
+        precondition(pendingTitles.allLaunchesRecorded && pendingTitles.awaitingTabNames)
+        precondition(pendingTitles.hasReturned)
+        precondition(garage.issue(for: pendingTitles) == nil)
+        precondition(pendingTitles.statusLabel == "Opened · awaiting check")
+        precondition(pendingTitles.tabNamesHelp == "1. Update the website\n2. Refactor the command parser\n3. Sketch a small prototype")
+        var partial = pendingTitles
+        partial.restoredTargets?.removeValue(forKey: "2")
+        precondition(!partial.allLaunchesRecorded && !partial.awaitingTabNames)
+        precondition(garage.issue(for: partial)?.summary == "Opening incomplete")
+        var ambiguous = pendingTitles
+        ambiguous.pendingTab = 2
+        precondition(!ambiguous.allLaunchesRecorded && !ambiguous.awaitingTabNames)
+        var pendingBounds = pendingTitles
+        pendingBounds.boundsPending = true
+        precondition(pendingBounds.allLaunchesRecorded && !pendingBounds.awaitingTabNames)
+
+        let failedParking = b.withStatus("attention", note: "Parking did not finish")
+        precondition(garage.issue(for: failedParking)?.summary == "Parking incomplete")
+        let acknowledgedFailure = pendingTitles.withStatus("attention", note: "Old failed acknowledgement")
+        precondition(acknowledgedFailure.allLaunchesRecorded)
+        precondition(acknowledgedFailure.statusLabel == "Opened · awaiting check")
+        precondition(garage.issue(for: acknowledgedFailure) == nil)
+
         garage.removeCar(a)
         precondition(garage.cars.map(\.id) == [b.id])
         precondition(garage.archives.map(\.id) == [a.id])
@@ -84,6 +113,9 @@ struct GarageInteractionTests {
         precondition(response.verifiedArchivedIds == ["sample-car"])
         let denial = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":false,"windows":[],"cars":[],"warnings":[],"error_code":"automation_denied","error":"Permission denied"}"#.utf8))
         precondition(denial.errorCode == "automation_denied")
+        let journal = try decoder.decode(ParkedCar.self, from: Data(#"{"id":"fixture","created_at":"2026-10-08T09:00:00Z","status":"restoring","note":"Restoring tab 1.","file_path":"/fixture","tabs":[{"index":0,"title":"Actual tab name","terminal_id":"original","provider":"shell","session_id":"","cwd":"/fixture","issue":""}],"restored_targets":{"0":{"window_id":"returned","terminal_id":"returned-tab","title_pending":true}},"pending_tab":null,"bounds_pending":false}"#.utf8))
+        precondition(journal.awaitingTabNames && journal.allLaunchesRecorded)
+        precondition(journal.tabNamesHelp == "1. Actual tab name")
         print("UI-model checks passed: quit during refresh, mutation quit guard, immediate reversible archive, feedback, stale/busy guards, multiple cars, one-click parking, preview isolation.")
     }
 }

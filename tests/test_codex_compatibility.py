@@ -105,26 +105,6 @@ class CodexCompatibilityTests(unittest.TestCase):
             fp.Processes().send_signal(child, 15)
         kill.assert_not_called()
 
-    def test_test_scope_cannot_close_or_append_to_working_window(self):
-        store = Mock(); store.cars.return_value = ([], [])
-        adapter = fp.TestWindowITerm({'window_id':'test','session_ids':['disposable']},store)
-        with patch.object(fp.ITerm, 'call') as call:
-            for action, args in [('close',dict(windowId='work',sessionIds=['real'])),
-                                 ('create',dict(windowId='work',command='ignored')),
-                                 ('focus',dict(windowId='test',sessionIds=['real']))]:
-                with self.assertRaises(fp.ParkError): adapter.call(action,**args)
-            call.assert_not_called()
-
-    def test_test_scope_hides_working_windows_and_rejects_added_tabs(self):
-        store = Mock(); store.cars.return_value = ([], [])
-        adapter = fp.TestWindowITerm({'window_id':'test','session_ids':['disposable']},store)
-        raw = [{'id':wid,'tabs':[{'sessions':[{'id':sid} for sid in sids]}]}
-               for wid,sids in [('test',['disposable']),('work',['real'])]]
-        with patch.object(fp.ITerm,'call',return_value=raw):
-            self.assertEqual([w['id'] for w in adapter.windows()],['test'])
-            raw[0]['tabs'][0]['sessions'].append({'id':'real'})
-            self.assertEqual(adapter.windows(),[])
-            with self.assertRaises(fp.ParkError): adapter.call('close',windowId='test',sessionIds=['disposable'])
 
 
 if __name__ == '__main__': unittest.main()

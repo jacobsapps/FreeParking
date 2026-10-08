@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Saved titles and optional per-window close using iTerm's Python runtime.
+"""Saved tab titles using iTerm's Python runtime.
 
 Never enables the API, changes confirmation settings, types input, or approves
 permission dialogs. The caller must persist recovery before invoking this file.
@@ -9,23 +9,8 @@ import sys
 import asyncio
 
 
-def matching_window(app, session_ids):
-    if not session_ids or len(set(session_ids)) != len(session_ids):
-        raise ValueError("Invalid saved window identity.")
-    matches = []
-    for window in app.terminal_windows:
-        if any(len(tab.all_sessions) != 1 for tab in window.tabs):
-            continue
-        actual = [tab.all_sessions[0].session_id for tab in window.tabs]
-        if actual == session_ids:
-            matches.append(window)
-    if len(matches) != 1:
-        raise ValueError("The saved window's tabs changed. No window was closed.")
-    return matches[0]
-
-
 def main(request):
-    if request.get("action") not in ("close", "set-title", "set-titles"):
+    if request.get("action") not in ("set-title", "set-titles"):
         print(json.dumps({"state": "error", "error": "Unknown iTerm operation."}))
         return
     result = {"state": "unavailable"}
@@ -37,8 +22,7 @@ def main(request):
 
     async def operate(connection):
         nonlocal result
-        # Initial subscription setup must happen outside a transaction. Refresh
-        # the hierarchy inside it before matching the exact saved identities.
+        # Title method invocations must run outside a transaction.
         app = await iterm2.async_get_app(connection)
         result = {"state": "error", "error": "Could not verify the saved window."}
         if request.get("action") in ("set-title", "set-titles"):
@@ -48,7 +32,8 @@ def main(request):
             updates, seen = [], set()
             for item in titles:
                 tabs = [tab for window in app.terminal_windows for tab in window.tabs
-                        if len(tab.all_sessions) == 1 and tab.all_sessions[0].session_id == item.get("sessionId")]
+                        if ("windowId" not in item or str(window.window_id) == str(item["windowId"]))
+                        and len(tab.all_sessions) == 1 and tab.all_sessions[0].session_id == item.get("sessionId")]
                 if len(tabs) != 1 or not isinstance(item.get("title"), str) or item["sessionId"] in seen:
                     raise ValueError("A restored tab changed. No titles were altered.")
                 seen.add(item["sessionId"])
@@ -58,8 +43,15 @@ def main(request):
             # Escape literal backslashes: saved text must not become expressions.
             async def update_title(tab, title):
                 await tab.async_set_title(title.replace("\\", "\\\\"))
-                if await tab.async_get_variable("title") != title:
-                    raise ValueError("iTerm did not retain a saved title. The car is kept; retry after the tabs finish opening.")
+                # Setting a title can acknowledge before its displayed variable
+                # settles. Read the same immutable tab again; never rewrite it or
+                # infer success from the setter acknowledgement alone.
+                for attempt in range(6):
+                    if await tab.async_get_variable("title") == title:
+                        return
+                    if attempt < 5:
+                        await asyncio.sleep(0.2)
+                raise ValueError("The saved tab name could not be confirmed yet. Recovery is kept; check again after the tabs finish opening.")
             # The connection multiplexes independent tab RPCs. Wait for every
             # result, even on a partial failure, before returning to the journal.
             outcomes = await asyncio.gather(*(update_title(tab, title) for tab, title in updates), return_exceptions=True)
@@ -68,19 +60,6 @@ def main(request):
                     raise outcome
             result = {"state": "updated"}
             return
-        # No user-input or other UI changes may race the identity check. A forced
-        # close is synchronous in iTerm; no confirmation can deadlock this block.
-        async with iterm2.Transaction(connection):
-            await app.async_refresh()
-            window = matching_window(app, request["sessionIds"])
-            if request.get("checkOnly"):
-                result = {"state": "ready"}
-                return
-            # Any error after this point is ambiguous: the parent MUST NOT retry
-            # through AppleScript or click a dialog. Keep recovery and stop.
-            result = {"state": "error", "error": "The close result is uncertain. Recovery is kept; check iTerm."}
-            await window.async_close(force=True)
-            result = {"state": "closed"}
 
     async def finish(connection):
         try:
@@ -102,7 +81,7 @@ def main(request):
         iterm2.run_until_complete(finish, retry=False)
     except (Exception, SystemExit) as error:
         if result["state"] != "unavailable":
-            result = {"state": "error", "error": str(error) or result.get("error", "Close did not finish.")}
+            result = {"state": "error", "error": str(error) or result.get("error", "Title update did not finish.")}
     print(json.dumps(result))
 
 

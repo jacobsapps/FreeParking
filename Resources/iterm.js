@@ -96,8 +96,15 @@ function run(argv) {
         for (const {tab, title} of updates) {
             try { tab.title = title; }
             catch (_) { tab.sessions()[0].name = title; }
-            if (tabTitle(tab, tab.sessions()[0]) !== title) {
-                throw new Error('iTerm could not restore the saved title. Enable its Python API and install its Python runtime (Scripts menu), then retry. The car is kept.');
+            // A newly opened tab's displayed title may lag the setter. Retry
+            // readback only; never issue another write or target a selected tab.
+            for (let attempt = 0; attempt < 6; attempt++) {
+                if (tabTitle(tab, tab.sessions()[0]) === title) break;
+                if (attempt === 5) {
+                    throw new Error('The saved tab name could not be confirmed yet. Recovery is kept; check again after the tabs finish opening.');
+                }
+                ObjC.import('Foundation');
+                $.NSThread.sleepForTimeInterval(0.2);
             }
         }
         return JSON.stringify({ok: true});
@@ -140,7 +147,7 @@ function run(argv) {
     if (request.action === 'create') {
         let w, tab;
         if (request.windowId) {
-            w = getWindow(request.windowId);
+            w = request.sessionIds ? checkedWindow() : getWindow(request.windowId);
             tab = w.createTabWithDefaultProfile({command: request.command});
         } else {
             w = app.createWindowWithDefaultProfile({command: request.command});
