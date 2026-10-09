@@ -87,6 +87,14 @@ final class Backend {
     static func problem(_ text: String) -> NSError { NSError(domain: "FreeParkingRebuild", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
 }
 
+final class ParkingSurface: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.94, alpha: 1).setFill()
+        dirtyRect.fill()
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
     var window: NSWindow!
     let table = NSTableView(), status = NSTextField(wrappingLabelWithString: ""), subtitle = NSTextField(wrappingLabelWithString: "")
@@ -116,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
         window.appearance = NSAppearance(named: .aqua)
         window.minSize = NSSize(width: 640, height: 500)
         window.backgroundColor = NSColor(calibratedRed: 0.96, green: 0.97, blue: 0.94, alpha: 1)
-        let content = NSView(); window.contentView = content
+        let content = ParkingSurface(); window.contentView = content
         let title = NSTextField(labelWithString: "Free Parking")
         title.font = .systemFont(ofSize: 29, weight: .bold); title.textColor = .systemTeal
         subtitle.stringValue = scope == nil ? "Put a window away. Pick up where you left off." : "Disposable test scope · your other windows are protected"

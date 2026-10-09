@@ -146,3 +146,14 @@ arguments, and no unrelated jobs may share the TTY. The helper is saved in the
 fingerprint and verified on return. Identification is live-proven; launch and
 verification contracts have offline coverage. The user's caffeinate tab was not
 closed or restarted as a test.
+
+Local installation acceptance — 2026-10-09
+-----------------------------------------
+Version 0.3.0 installed at the existing Free Parking app path and bundle identity,
+then launched. The installed native app's actual content view was rendered and
+visually inspected at native resolution: one current eight-tab working window,
+no identification/permission errors, Settings and retained/previous recovery
+controls present. This is a native view render, not a full desktop screenshot.
+The installed backend matches the checkout; signature verification passed; all
+legacy recovery files retain their original hashes. The old app is backed up.
+No installed-app parking test was performed on the remaining working window.
