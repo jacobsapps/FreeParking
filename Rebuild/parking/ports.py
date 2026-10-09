@@ -1,0 +1,23 @@
+"""Subsystem contracts; implementations are supplied at the composition root."""
+from typing import Protocol
+from .model import Observation, Tab
+
+
+class Observer(Protocol):
+    def observe(self) -> Observation: ...
+
+
+class Terminal(Protocol):
+    def call(self, action: str, **kwargs) -> dict: ...
+    def windows(self) -> list: ...
+
+
+class Provider(Protocol):
+    name: str
+    def identify(self, session: dict, processes: dict) -> Tab: ...
+    def launch(self, tab: Tab, receipt: str) -> str: ...
+
+
+class Stopper(Protocol):
+    def interrupt(self, tab: Tab, permit) -> None: ...
+    def stopped(self, tab: Tab) -> bool: ...

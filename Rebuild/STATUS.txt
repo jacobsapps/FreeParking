@@ -1,0 +1,138 @@
+FREE PARKING — FRESH REBUILD, 2026-10-09
+
+Codex and Claude are implemented in this core. The production build now uses
+this implementation with explicit selected-window actions. The native app grants
+a --live capability; bare backend invocations still deny mutations. Disposable
+scope execution retains the independent ownership/protective guard.
+The September implementation is a comparison model, not this implementation.
+
+Architecture
+------------
+Native AppKit UI -> JSON service -> per-window restartable workflow
+                                  |-> SQLite recovery journal
+                                  |-> durable mutation/identity gate
+                                  |-> read-only observer + outcome verifier
+                                  |-> iTerm terminal adapter (minimal JXA)
+                                  |-> shell / Claude / Codex provider adapters
+Live tests wrap the composition with a separate protective ownership shim.
+Display titles are not identity inputs. No hooks or background services added.
+
+What was actually found and fixed
+--------------------------------
+1. Current shared-server Codex does not hold an open rollout in its TUI process.
+   Native mcpServerStatus/list exposes each conversation's codex_tui httpOrigin.
+   Join that loopback endpoint to the kernel's PID-owned TCP listening sockets.
+   Confirm process birth, TTY, folder, unique thread binding and stable endpoints.
+   This works even with identical titles and identical folders. No latest/title
+   fallback, guessed session ID, shared-daemon signal or server restart.
+2. A warm Codex resume can retain its previous, dead TUI endpoint. After saving,
+   closing the original terminal and confirming client exit, archive only that
+   exact stopped native conversation. Unarchive it before exact CLI resume; the
+   resulting new runtime receives the new TUI endpoint. Keep a durable native
+   archive intent/receipt; ambiguous acknowledgements are observed, not replayed.
+3. iTerm's window disappearance is not evidence that its agents exited. Check
+   exact saved client births and, after source tabs disappear, gracefully stop
+   only those clients. Verify exit before calling the window parked. Never kill
+   process groups or shared infrastructure. Slow/unconfirmed exits stay pending.
+4. Stopping Claude before a mixed-window close can remove its tab prematurely.
+   Instead persist its native unfinished request checkpoint, close the complete
+   exact window normally, then confirm client exit and native unfinished request.
+   Codex gets an exact native turn/interrupt; neither provider relies on labels.
+5. Native endpoint changes during startup are read races, not failed creations.
+   Bounded read-only settling and exact create receipts prevent duplicate launches
+   and the immediate false 'opening incomplete' result after successful startup.
+
+Continuation
+------------
+Local Settings: auto_continue_interrupted (default true), continue_message
+(default exactly "please continue"). Only a confirmed interruption of that exact
+conversation grants continuation. Idle sessions, natural completion and cancelled
+closes do not. Persist the safely quoted CLI resume argument before launch.
+Never type into an existing tab or escalate agent permissions. Lost launch
+acknowledgements are never blindly repeated. This is at-most-once launch, not a
+guarantee of message delivery after every crash. Existing manually reopened
+conversations are refused rather than duplicated; automatic adoption is not
+implemented.
+
+Evidence and honest boundaries
+------------------------------
+Test environment: macOS 27.0.1, iTerm2 3.7.3, Codex CLI 0.160.1 with native
+shared daemon 0.162.0, Claude Code 2.1.296. Do not assume future/older versions
+expose the same native registry, endpoints or archive schema. Unknown identities
+are refused, never guessed.
+- Three real Codex park/archive/unarchive/reopen cycles passed with exact native
+  session IDs/folders. A separate same-title/same-folder fixture remained open.
+- Three live mixed Claude + Codex cycles passed: the first while both agents
+  were running, followed by two idle cycles. A real cancelled close kept the
+  original tab IDs/order. With auto-continuation disabled, a second newly created
+  running mixed window interrupted/restored both agents with zero continuation
+  messages in both native transcripts. All protected baseline windows and every
+  unselected fixture retained their exact tab IDs/order throughout.
+- Live mixed running Claude + Codex windows now save/close/reopen successfully.
+  The native transcripts verify one "please continue" user message per interrupted
+  conversation, not merely an argv string. Reopening again does not add messages.
+- Earlier failed runs are preserved locally: stale Codex runtime endpoints,
+  lingering clients, startup identity races, and short client-exit waits. Their
+  protective baselines were never rewritten to make tests pass.
+- Exact live terminal metadata and protected tab ID/order audits are the evidence;
+  no claim of visual desktop acceptance is made from a build or simulator test.
+- 127 rebuild Python tests and 31 outer safety tests pass; JXA object-model
+  checks, both native compilations and app transport/view-model self-test pass.
+  Python tests exercise real SQLite durability/CAS/flock, interruption receipts,
+  shutdown identity checks, endpoint ambiguity/races, archive reconciliation,
+  launch replay rejection, manual-resume refusal, settings and the outer shim.
+- Native bundle compiles/signs and passes transport/view-model self-tests. Native
+  app installation and read-only native UI acceptance are recorded separately
+  in local deployment evidence. Never close the user's remaining window merely
+  to test the installed UI. Legacy recovery is preserved without guessed migration.
+
+Verification commands
+---------------------
+python3 -m unittest discover -s Rebuild/tests -v
+python3 Rebuild/verify.py --suite all --build
+
+Choose individual components with --suite components / agents / workflow /
+integration / safety. Integration replaces OS calls with deterministic fakes;
+it is not live iTerm evidence. Build never installs or launches the app.
+
+Live acceptance (signed-in CLIs, own test folders under a trusted parent):
+  bash Rebuild/build-test-tools.sh
+  python3 Rebuild/prove_agents.py --run --directory NEW_PRIVATE_DIRECTORY --cycles 3
+This creates new conversations and tests a running mixed window, idle repeated
+cycles, native continuation counts, a real cancelled close, and settings off.
+The ordinary iTerm sheet is approved/cancelled only by a test-only AX helper
+which requires exact owned window/tab IDs and a durable close intent. No changes
+to iTerm settings. No synthetic input. The helper is not bundled in the app.
+
+Selectable lab:
+  python3 Rebuild/lab.py --scope NEW_PRIVATE_DIRECTORY/scope.json init
+  python3 Rebuild/lab.py --scope SCOPE_PATH create --provider mixed --tabs 2 --busy
+  python3 Rebuild/lab.py --scope SCOPE_PATH list
+  python3 Rebuild/lab.py --scope SCOPE_PATH round-trip --window OWNED_WINDOW_ID --confirm-own-close OK
+  python3 Rebuild/lab.py --scope SCOPE_PATH check --window OWNED_WINDOW_ID
+  python3 Rebuild/lab.py --scope SCOPE_PATH audit
+Providers: shell, claude, codex, mixed. Only registry-created fixtures selectable.
+A check may reconcile acknowledged creation; it cannot adopt a work window or
+repeat an unknown create. Protected desktop changes stop the scope. All live
+metadata, native conversations, logs and private evidence remain local/ignored.
+
+Deployment and remaining boundaries:
+- Default build script installs the fresh selected-window app, backing up the old
+  app. Native UI/bundled read-only inspection is checked during installation; no
+  installed-app parking test is performed on the user's remaining work window.
+- Legacy recovery remains untouched and accessible from Previous recovery. The
+  new journal has its own path; legacy title-based identities are not migrated.
+- Split panes and unknown/multiple-agent identities remain explicitly unsupported.
+- Lost interruption acknowledgements remain pending rather than blindly retried.
+No claim is made of exhaustive crash-timing or cross-version compatibility.
+
+Explicit cleanup after verification
+-----------------------------------
+The user requested removal of all test windows. Rebuild/cleanup.py builds a new
+cleanup-only protection plan from unchanged original create receipts, not by
+repairing or editing failed/stale live-test baselines. Every current non-owned
+window and runner ancestry remains protected. Exact tab IDs, process births and
+original receipt hashes are checked before each normal close/confirmation.
+Eleven receipt-proven disposable windows were closed; the remaining working
+window retained all seven original tab identities and their order. No new test
+windows should be created during this installation.

@@ -1,0 +1,27 @@
+// This executes the shipped JXA adapter inside a fake object-model boundary.
+const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
+let mutations=[], token='fixture-token';
+const session={id:()=> 'test-tab',tty:()=>'/dev/test',name:()=> 'Session name',variable:()=>token};
+const tab={sessions:()=>[session],title:()=> 'Actual tab title',currentSession:()=>session};
+const workSession={id:()=> 'protected',tty:()=> '/dev/work',name:()=> 'Work',variable:()=>''};
+const work={id:()=>1,tabs:()=>[{sessions:()=>[workSession]}],close:()=>{throw Error('Protected window changed')}};
+const test={id:()=>2,tabs:()=>[tab],close:()=>mutations.push('close'),createTabWithDefaultProfile:()=>{mutations.push('append');return tab;},currentTab:()=>tab};
+let raw=[work,test];
+const app={running:()=>true,windows:()=>raw,createWindowWithDefaultProfile:()=>{mutations.push('create');return test;}};
+const ctx=vm.createContext({Application:()=>app});
+vm.runInContext(fs.readFileSync('Rebuild/parking/terminal.js','utf8'),ctx);
+const call=r=>JSON.parse(ctx.run([JSON.stringify(r)]));
+const listed=call({action:'list'});
+assert.equal(listed[1].tabs[0].sessions[0].title,'Actual tab title');
+assert.equal(listed[1].tabs[0].sessions[0].receipt,'fixture-token');
+assert.deepEqual(mutations,[]);
+for(const action of ['close','create'])assert.throws(()=>call({action,windowId:'2',sessionIds:['protected'],command:'fixture'}));
+assert.deepEqual(mutations,[]);
+call({action:'close',windowId:'2',sessionIds:['test-tab']});
+call({action:'create',windowId:'2',sessionIds:['test-tab'],command:'fixture'});
+assert.deepEqual(mutations,['close','append']);
+raw=[work,{...test,tabs:()=>[{sessions:()=>[session,workSession]}]}];
+assert.throws(()=>call({action:'close',windowId:'2',sessionIds:['test-tab','protected']}));
+assert.throws(()=>call({action:'quit'}));
+assert.deepEqual(mutations,['close','append']);
+console.log('Fresh JXA adapter: raw inventory, real tab label, receipt, exact-target close/append, split/unknown guards passed (offline object model).');

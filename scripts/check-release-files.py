@@ -6,8 +6,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 TOP_LEVEL = ("README.md", ".gitignore", "Package.swift")
-SOURCE_DIRS = ("Sources", "Resources", "Artwork", "scripts", "tests")
-TEXT_SUFFIXES = {".swift", ".py", ".js", ".sh", ".md", ".plist", ".entitlements"}
+SOURCE_DIRS = ("Sources", "Resources", "Artwork", "scripts", "tests", "Rebuild")
+TEXT_SUFFIXES = {".swift", ".py", ".js", ".sh", ".md", ".plist", ".entitlements", ".txt"}
 ARTWORK = {"Artwork/FreeParkingIcon.png", "Artwork/FreeParkingBanner.png", "Resources/AppIcon.icns"}
 PATTERNS = (
     ("private home path", re.compile(r"/Users/(?!example/|Shared/)[A-Za-z0-9._-]+/")),
