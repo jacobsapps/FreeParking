@@ -195,7 +195,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTableViewDataSource,
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self.renderOwnView() }
                 }
                 if waitingToQuit { NSApp.reply(toApplicationShouldTerminate: true); return }
-                if args.first == "list" || args.first == "park" || args.first == "reopen" { perform(["scan"]) }
+                if args.first == "list" || args.first == "settings" || args.first == "park" || args.first == "reopen" { perform(["scan"]) }
             }
         }
     }
