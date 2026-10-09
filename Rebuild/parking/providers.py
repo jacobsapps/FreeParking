@@ -19,15 +19,29 @@ class Shell:
     def identify(self, session, processes):
         attached = [p for p in processes.values() if p['tty'] == session['tty']]
         shells = [p for p in attached if Path(p['executable']).name.lstrip('-') == 'zsh']
-        unexpected = [p for p in attached if Path(p['executable']).name.lstrip('-') not in ('zsh', 'login')]
-        if len(shells) != 1 or unexpected:
-            raise ParkingError('This tab is neither an identified agent nor an idle zsh folder. Nothing will be guessed or closed.')
-        p = shells[0]
+        helpers = [p for p in attached if Path(p['executable']).name == 'caffeinate']
+        unexpected = [p for p in attached if Path(p['executable']).name.lstrip('-') not in ('zsh', 'login', 'caffeinate')]
+        keep_awake = len(helpers) == 1 and len(shells) <= 1 and not unexpected
+        if keep_awake:
+            p = helpers[0]
+            # Only the exact argument-free OS helper. No arbitrary shell program,
+            # wrapped command, PID-wait target, or flags are inferred/replayed.
+            if self.processes.executable(p['pid']) != '/usr/bin/caffeinate':
+                raise ParkingError('The keep-awake process is not the system caffeinate executable.')
+            if self.processes.command(p['pid']) not in ('caffeinate', '/usr/bin/caffeinate'):
+                raise ParkingError('Only plain caffeinate can be saved; this helper has unsupported arguments.')
+            if shells and p['ppid'] != shells[0]['pid']:
+                raise ParkingError('The keep-awake helper is not this shell’s direct child.')
+        else:
+            if len(shells) != 1 or unexpected or helpers:
+                raise ParkingError('This tab is neither an identified agent nor an idle zsh folder. Nothing will be guessed or closed.')
+            p = shells[0]
         cwd = self.processes.cwd(p['pid'])
         if not Path(cwd).is_absolute() or not Path(cwd).is_dir():
             raise ParkingError('Cannot confirm this shell’s working folder.')
         return Tab(session['id'], session['tty'], session.get('title', ''), 'shell', '', cwd,
-                   Process(p['pid'], p['started'], p['tty'], p['executable'], p['ppid']))
+                   Process(p['pid'], p['started'], p['tty'], p['executable'], p['ppid']),
+                   shell_command='caffeinate' if keep_awake else '')
 
     def launch(self, tab, receipt):
         tab.validate()
@@ -38,7 +52,7 @@ class Shell:
         # This is the NEW process's command, never input typed into a terminal.
         # A machine receipt is separate from both titles and agent identity.
         body = ('cd ' + shlex.quote(tab.cwd) + " && printf '\\033]1337;SetUserVar=freeParkingReceipt="
-                + encoded + "\\007' && exec /bin/zsh -l")
+                + encoded + "\\007' && exec " + ("/usr/bin/caffeinate" if tab.shell_command else "/bin/zsh -l"))
         return shlex.join(['/bin/zsh', '-lc', body])
 
 

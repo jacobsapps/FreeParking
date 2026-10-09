@@ -75,6 +75,20 @@ class Processes:
         return {'http://' + line[1:] for line in output.splitlines()
                 if re.fullmatch(r'n127\.0\.0\.1:[0-9]+', line)}
 
+    def executable(self, pid):
+        import ctypes
+        library = ctypes.CDLL('/usr/lib/libproc.dylib')
+        function = library.proc_pidpath
+        function.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        function.restype = ctypes.c_int
+        buffer = ctypes.create_string_buffer(4096)
+        if function(pid, buffer, len(buffer)) <= 0:
+            raise ParkingError('Cannot verify this helper’s executable path.')
+        return buffer.value.decode()
+
+    def command(self, pid):
+        return self.runner(['/bin/ps', '-p', str(pid), '-o', 'args=']).strip()
+
     def started_utc(self, pid):
         return ' '.join(self.runner(['/usr/bin/env', 'TZ=UTC', '/bin/ps', '-p', str(pid), '-o', 'lstart=']).split())
 

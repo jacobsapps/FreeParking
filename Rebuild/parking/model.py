@@ -53,8 +53,11 @@ class Tab:
     process: Process
     activity: str = "unknown"
     turn_id: str = ""
+    shell_command: str = ""
 
     def validate(self):
+        if self.shell_command not in ('', 'caffeinate') or (self.shell_command and self.provider != 'shell'):
+            raise ParkingError('Unsupported saved shell command.')
         if self.activity not in ('unknown', 'idle', 'running', 'waiting'):
             raise ParkingError('Unknown agent activity state.')
         if not self.terminal_id or not self.tty or self.process.tty != self.tty:
@@ -73,7 +76,7 @@ class Tab:
     @property
     def identity(self):
         return (self.terminal_id, self.tty, self.provider, self.session_id,
-                self.cwd, self.process.key)
+                self.cwd, self.process.key) + ((self.shell_command,) if self.shell_command else ())
 
     def encode(self):
         self.validate()

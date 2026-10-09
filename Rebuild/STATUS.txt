@@ -76,7 +76,7 @@ are refused, never guessed.
   protective baselines were never rewritten to make tests pass.
 - Exact live terminal metadata and protected tab ID/order audits are the evidence;
   no claim of visual desktop acceptance is made from a build or simulator test.
-- 127 rebuild Python tests and 31 outer safety tests pass; JXA object-model
+- 129 rebuild Python tests and 31 outer safety tests pass; JXA object-model
   checks, both native compilations and app transport/view-model self-test pass.
   Python tests exercise real SQLite durability/CAS/flock, interruption receipts,
   shutdown identity checks, endpoint ambiguity/races, archive reconciliation,
@@ -136,3 +136,13 @@ original receipt hashes are checked before each normal close/confirmation.
 Eleven receipt-proven disposable windows were closed; the remaining working
 window retained all seven original tab identities and their order. No new test
 windows should be created during this installation.
+
+Keep-awake tab compatibility
+---------------------------
+A plain caffeinate tab in the current working window is now identified read-only
+and preserved as the exact system helper, not silently replaced by an idle shell.
+Kernel executable path must be /usr/bin/caffeinate, argv must contain no extra
+arguments, and no unrelated jobs may share the TTY. The helper is saved in the
+fingerprint and verified on return. Identification is live-proven; launch and
+verification contracts have offline coverage. The user's caffeinate tab was not
+closed or restarted as a test.

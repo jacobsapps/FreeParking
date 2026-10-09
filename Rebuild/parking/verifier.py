@@ -83,7 +83,8 @@ class Verifier:
         receipt = next((s.get('receipt') for t in raw['tabs'] for s in t['sessions']
                         if s['id'] == target['terminal_id']), None)
         return (receipt == target['receipt'] and tab.provider == saved.provider
-                and tab.session_id == saved.session_id and tab.cwd == saved.cwd)
+                and tab.session_id == saved.session_id and tab.cwd == saved.cwd
+                and tab.shell_command == saved.shell_command)
 
     @classmethod
     def returned(cls, record, observation):

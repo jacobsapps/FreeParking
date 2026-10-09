@@ -105,3 +105,25 @@ class BoundaryTests(unittest.TestCase):
             terminal=Mock();terminal.windows.return_value=[dict(id='w',tabs=[dict(sessions=[dict(id='t',tty='/dev/test',title='test')])])]
             p=Mock();p.cwd.return_value=folder;p.all.side_effect=[{1:dict(pid=1,ppid=0,tty='/dev/test',started='one',executable='/bin/zsh')},{}]
             with self.assertRaises(Uncertain):Observer(terminal,p,Providers(Shell(p))).observe()
+
+    def test_plain_keep_awake_tab_preserves_the_exact_helper(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p=Mock();p.cwd.return_value=folder;p.command.return_value='caffeinate';p.executable.return_value='/usr/bin/caffeinate'
+            shell=dict(pid=1,ppid=0,tty='/dev/test',started='shell',executable='-zsh')
+            helper=dict(pid=2,ppid=1,tty='/dev/test',started='helper',executable='caffeinate')
+            provider=Shell(p)
+            tab=provider.identify(dict(id='t',tty='/dev/test'),{1:shell,2:helper})
+            self.assertEqual(tab.shell_command,'caffeinate');self.assertEqual(tab.process.pid,2)
+            launch=provider.launch(tab,str(uuid.uuid4()))
+            self.assertIn('exec /usr/bin/caffeinate',launch)
+            restored=provider.identify(dict(id='new',tty='/dev/test'),{2:helper})
+            self.assertEqual(restored.shell_command,'caffeinate')
+            p.command.return_value='caffeinate /bin/unsafe'
+            with self.assertRaises(ParkingError):provider.identify(dict(id='t',tty='/dev/test'),{1:shell,2:helper})
+
+    def test_keep_awake_helper_does_not_admit_unrelated_jobs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            p=Mock();p.cwd.return_value=folder;p.command.return_value='caffeinate';p.executable.return_value='/usr/bin/caffeinate'
+            helper=dict(pid=2,ppid=1,tty='/dev/test',started='helper',executable='caffeinate')
+            unknown=dict(pid=3,ppid=1,tty='/dev/test',started='other',executable='unknown')
+            with self.assertRaises(ParkingError):Shell(p).identify(dict(id='t',tty='/dev/test'),{2:helper,3:unknown})

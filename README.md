@@ -3,7 +3,7 @@
 # Free Parking
 
 A local macOS app for putting an **explicitly selected iTerm window** away and
-resuming its Claude, Codex and idle folder tabs in their original order.
+resuming its Claude, Codex, idle folder and plain `caffeinate` tabs in their original order.
 
 The current app is a fresh subsystem implementation in `Rebuild/`. The old car UI
 and backend remain in source history and the legacy source directories for
