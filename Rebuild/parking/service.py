@@ -68,7 +68,7 @@ def dispatch(arguments, root=DEFAULT_ROOT):
             for record in store.all():
                 if record['phase'] != Phase.RETURNED.value:
                     try:
-                        workflow.reconcile(record['id'])
+                        workflow.reconcile(record['id'],read_only=True)
                     except Exception as error:
                         reply['errors'].append(dict(record_id=record['id'], message=str(error)))
         elif action in ('park', 'reopen'):

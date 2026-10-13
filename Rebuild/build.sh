@@ -13,10 +13,10 @@ APP="$PWD/dist/$NAME.app"
 # Generated output only: a clean bundle must not retain the legacy executable.
 rm -rf -- "$APP"
 mkdir -p .build/rebuild-module-cache "$APP/Contents/MacOS" "$APP/Contents/Resources/rebuild/parking"
-swiftc -O -parse-as-library -target arm64-apple-macosx14.0 \
-  -module-cache-path .build/rebuild-module-cache Rebuild/App/FreeParkingRebuild.swift \
-  -o "$APP/Contents/MacOS/FreeParkingRebuild"
-cp Rebuild/backend.py "$APP/Contents/Resources/rebuild/"
+swift build -c release
+BIN_DIR="$(swift build -c release --show-bin-path)"
+cp "$BIN_DIR/FreeParking" "$APP/Contents/MacOS/FreeParking"
+cp Rebuild/backend.py Rebuild/garage_backend.py "$APP/Contents/Resources/rebuild/"
 cp Rebuild/parking/*.py Rebuild/parking/terminal.js "$APP/Contents/Resources/rebuild/parking/"
 rm -f "$APP/Contents/Resources/rebuild/parking/confirmation_testing.py" "$APP/Contents/Resources/rebuild/parking/codex_testing.py" "$APP/Contents/Resources/rebuild/parking/agent_testing.py"
 cp Resources/test_safety.py "$APP/Contents/Resources/rebuild/"
@@ -25,20 +25,20 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>FreeParkingRebuild</string>
+<key>CFBundleExecutable</key><string>FreeParking</string>
 <key>CFBundleIdentifier</key><string>$IDENTIFIER</string>
 <key>CFBundleName</key><string>$NAME</string>
 <key>CFBundleDisplayName</key><string>$NAME</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
-<key>CFBundleVersion</key><string>2026100901</string>
+<key>CFBundleShortVersionString</key><string>0.4.0</string>
+<key>CFBundleVersion</key><string>2026101301</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
-<key>NSAppleEventsUsageDescription</key><string>Save and restore only the iTerm window you select.</string>
+<key>NSAppleEventsUsageDescription</key><string>Save and restore your iTerm windows when you choose Park my windows.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
 codesign --force --sign - --entitlements Resources/FreeParking.entitlements "$APP"
 codesign --verify --deep --strict "$APP"
-"$APP/Contents/MacOS/FreeParkingRebuild" --self-test
+
 printf 'Built, not installed or launched: %s\n' "$APP"

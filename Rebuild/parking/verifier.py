@@ -25,17 +25,23 @@ class Observer:
         # Neither a denied permission nor an unreadable process list is 'empty'.
         raw = self.terminal.windows()
         processes = self.processes.all()
-        windows, issues = [], {}
+        windows, issues, tab_issues, resolved = [], {}, {}, {}
         self.providers.begin_observation()
         try:
             for window in raw:
-                try:
-                    if not window['tabs'] or any(len(t['sessions']) != 1 for t in window['tabs']):
-                        raise ParkingError('Empty windows and split panes are not supported by this proving slice.')
-                    tabs = tuple(self.providers.identify(t['sessions'][0], processes) for t in window['tabs'])
-                    windows.append(Window(window['id'], tabs))
-                except ParkingError as error:
-                    issues[window['id']] = str(error)
+                tabs, problems = [], []
+                for index, raw_tab in enumerate(window['tabs']):
+                    try:
+                        if len(raw_tab['sessions']) != 1:
+                            raise ParkingError('Split panes cannot yet be parked together.')
+                        tab = self.providers.identify(raw_tab['sessions'][0], processes)
+                        tabs.append(tab); resolved[tab.terminal_id] = tab
+                    except ParkingError as error:
+                        problems.append('Tab ' + str(index + 1) + ': ' + str(error))
+                        for session in raw_tab['sessions']: tab_issues[session['id']] = str(error)
+                if not window['tabs']: problems.append('Empty window.')
+                if problems: issues[window['id']] = '\n'.join(problems)
+                else: windows.append(Window(window['id'], tuple(tabs)))
         finally:
             self.providers.end_observation()
         # Prevent a read/process race from being represented as a good binding.
@@ -43,7 +49,7 @@ class Observer:
         for w in windows:
             if any(after.get(t.process.pid, {}).get('started') != t.process.started for t in w.tabs):
                 raise Uncertain('A process changed during inspection. Observe again; no mutation authorized.')
-        return Observation(tuple(raw), tuple(windows), issues)
+        return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved)
 
 
 class Verifier:

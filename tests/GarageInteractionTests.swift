@@ -116,6 +116,27 @@ struct GarageInteractionTests {
         let journal = try decoder.decode(ParkedCar.self, from: Data(#"{"id":"fixture","created_at":"2026-10-08T09:00:00Z","status":"restoring","note":"Restoring tab 1.","file_path":"/fixture","tabs":[{"index":0,"title":"Actual tab name","terminal_id":"original","provider":"shell","session_id":"","cwd":"/fixture","issue":""}],"restored_targets":{"0":{"window_id":"returned","terminal_id":"returned-tab","title_pending":true}},"pending_tab":null,"bounds_pending":false}"#.utf8))
         precondition(journal.awaitingTabNames && journal.allLaunchesRecorded)
         precondition(journal.tabNamesHelp == "1. Actual tab name")
+        var unverifiedV2 = pendingTitles
+        unverifiedV2.returnVerified = false
+        precondition(unverifiedV2.allLaunchesRecorded && !unverifiedV2.hasReturned)
+        precondition(unverifiedV2.needsAttention && garage.issue(for: unverifiedV2) != nil)
+        let preferences = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"settings":{"auto_continue_interrupted":false,"continue_message":"continue now"}}"#.utf8))
+        precondition(preferences.settings?.autoContinueInterrupted == false)
+        precondition(preferences.settings?.continueMessage == "continue now")
+        let fractional = try decoder.decode(ParkedCar.self, from: Data(#"{"id":"fixture","created_at":"2026-10-13T17:00:00.123456+00:00","status":"parked","note":"","file_path":"/fixture","tabs":[],"return_verified":false}"#.utf8))
+        precondition(abs(fractional.date.timeIntervalSince1970 - 1791910800.123456) < 0.001)
+        if let marker = CommandLine.arguments.firstIndex(of: "--backend-contract") {
+            let data = try Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[marker + 1]))
+            let replies = try decoder.decode([BackendResponse].self, from: data)
+            precondition(replies.count == 3 && replies.allSatisfy(\.ok))
+            precondition(replies[0].windows.count == 2 && replies[0].windows.allSatisfy(\.canPark))
+            precondition(replies[1].cars.count == 1 && replies[1].cars[0].status == "parked")
+            precondition(replies[1].cars[0].returnVerified == false)
+            precondition(replies[1].cars[0].date > .distantPast)
+            precondition(replies[2].cars.isEmpty && replies[2].archives?.count == 1)
+            precondition(replies[2].archives?[0].returnVerified == true)
+            precondition(replies[2].verifiedArchivedIds == [replies[1].cars[0].id])
+        }
         print("UI-model checks passed: quit during refresh, mutation quit guard, immediate reversible archive, feedback, stale/busy guards, multiple cars, one-click parking, preview isolation.")
     }
 }

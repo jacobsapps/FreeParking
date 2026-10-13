@@ -1,5 +1,5 @@
 """Explicit identities and states. Display text is never an identity input."""
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 from pathlib import Path
 import hashlib
@@ -130,6 +130,8 @@ class Observation:
     raw: tuple
     windows: tuple
     issues: dict
+    tab_issues: dict = field(default_factory=dict)
+    resolved_tabs: dict = field(default_factory=dict)
 
     @property
     def terminal_ids(self):

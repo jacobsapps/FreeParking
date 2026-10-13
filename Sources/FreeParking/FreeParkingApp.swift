@@ -20,6 +20,7 @@ struct FreeParkingApp: App {
                 .onAppear {
                     delegate.garage = garage
                     delegate.configurePreviewCapture()
+                    delegate.configureLiveCapture()
                 }
         }
         .defaultSize(width: GarageLayout.width, height: GarageLayout.height)
@@ -31,6 +32,7 @@ struct FreeParkingApp: App {
                     .keyboardShortcut("r")
                     .disabled(garage.busy)
                 Button("Show Recovery Files") { garage.revealGarage() }
+                Button("Show Previous Recovery Files") { garage.revealPreviousRecovery() }
             }
         }
     }
@@ -41,6 +43,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var garage: Garage?
     private var captureConfigured = false
     private var pendingQuit: Task<Void, Never>?
+
+    func configureLiveCapture() {
+        let prefix = "--render-own-view="
+        guard !PreviewMode.enabled, !captureConfigured,
+              let arg = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) else { return }
+        captureConfigured = true
+        Task { @MainActor in
+            for _ in 0..<120 {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let garage, !garage.busy, garage.hasScanned || garage.problem != nil else { continue }
+                let view = GarageView(exporting: true).environmentObject(garage)
+                    .frame(width: GarageLayout.width, height: GarageLayout.height)
+                    .environment(\.colorScheme, .dark)
+                let renderer = ImageRenderer(content: view); renderer.scale = 2
+                if let image = renderer.cgImage,
+                   let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: String(arg.dropFirst(prefix.count))))
+                }
+                return
+            }
+        }
+    }
 
     func configurePreviewCapture() {
         guard PreviewMode.enabled, !captureConfigured else { return }

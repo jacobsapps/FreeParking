@@ -12,10 +12,12 @@ class IdentityTests(unittest.TestCase):
         self.processes=Mock();self.processes.loopback_listeners.return_value={'http://127.0.0.1:5001'}
         self.processes.all.return_value={50:dict(started='birth',tty='/dev/own')}
         self.rows={self.sid:('http://127.0.0.1:5001','connected'),self.other:('http://127.0.0.1:5002','connected')}
+        self.threads={sid:dict(id=sid,source='vscode') for sid in self.rows}
         self.rpc=Mock();self.rpc.call.side_effect=self.call
         self.identity=CodexIdentity(self.processes,self.rpc)
     def call(self,method,params):
         if method=='thread/loaded/list':return dict(data=list(self.rows))
+        if method=='thread/read':return dict(thread=self.threads[params['threadId']])
         self.assertEqual(method,'mcpServerStatus/list');self.assertEqual(params['serverName'],'codex_tui')
         origin,status=self.rows[params['threadId']]
         return dict(data=[dict(name='codex_tui',httpOrigin=origin,runtimeStatus=status)])
@@ -77,3 +79,31 @@ class IdentityTests(unittest.TestCase):
         with patch('parking.verifier.time.sleep'):
             self.assertEqual(observer.observe_until(lambda s:s=='stable'),'stable')
         self.assertEqual(observer.observe.call_count,2)
+
+    def test_native_child_agents_share_parent_endpoint_without_ambiguity(self):
+        self.rows[self.other]=self.rows[self.sid]
+        self.threads[self.other]['source']={'subAgent':{'thread_spawn':{'parent_thread_id':self.sid}}}
+        self.assertEqual(self.identity.resolve(self.pid),self.sid)
+
+    def test_nested_subagents_resolve_to_one_native_root(self):
+        child=str(uuid.uuid4());self.rows[child]=self.rows[self.sid];self.rows[self.other]=self.rows[self.sid]
+        self.threads[self.other]['source']={'subAgent':{'thread_spawn':{'parent_thread_id':self.sid}}}
+        self.threads[child]=dict(id=child,source={'subAgent':{'thread_spawn':{'parent_thread_id':self.other}}})
+        self.assertEqual(self.identity.resolve(self.pid),self.sid)
+
+    def test_unrelated_or_cyclic_child_ancestry_is_not_guessed(self):
+        self.rows[self.other]=self.rows[self.sid]
+        for parent in (str(uuid.uuid4()),self.other):
+            self.threads[self.other]['source']={'subAgent':{'thread_spawn':{'parent_thread_id':parent}}}
+            with self.assertRaises(ParkingError):self.identity.resolve(self.pid)
+
+    def test_fork_metadata_is_not_subagent_ownership(self):
+        self.rows[self.other]=self.rows[self.sid]
+        self.threads[self.other]['forkedFromId']=self.sid
+        with self.assertRaises(ParkingError):self.identity.resolve(self.pid)
+
+    def test_malformed_subagent_metadata_is_rejected(self):
+        self.rows[self.other]=self.rows[self.sid]
+        for value in (None, 'worker', {}, {'thread_spawn':None}, {'thread_spawn':'worker'}):
+            self.threads[self.other]['source']={'subAgent':value}
+            with self.assertRaises(ParkingError):self.identity.resolve(self.pid)

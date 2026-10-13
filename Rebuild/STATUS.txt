@@ -157,3 +157,43 @@ controls present. This is a native view render, not a full desktop screenshot.
 The installed backend matches the checkout; signature verification passed; all
 legacy recovery files retain their original hashes. The old app is backed up.
 No installed-app parking test was performed on the remaining working window.
+
+Parking interface and subagent identity repair — 2026-10-13
+---------------------------------------------------------
+The production build now uses the original SwiftUI parking-lot/car interface,
+not the temporary AppKit list UI. The new presentation adapter still uses the
+v2 recovery store, exact identity checks and mutation gate; the legacy backend
+is not bundled. Park my windows persists and verifies every window's recovery
+before the first interruption. A failed save or unresolved tab prevents closing;
+a cancelled/uncertain close stops the batch. Review windows retains unresolved
+windows and their individual tab problems.
+
+Read-only inspection found the reported Codex ambiguity was one native root
+conversation plus its explicitly spawned subagents sharing that root's TUI
+endpoint. Identity now follows native parent-thread ancestry. Titles, folder
+names, timestamps and fork metadata are not identity inputs. Two unrelated
+roots, malformed ancestry and cycles remain rejected. Both current windows
+(11 tabs total) identified without the prior ambiguity in the read-only check.
+
+Refresh never completes native archive/close operations. Returned-car state
+comes from explicit v2 verification, not legacy launch-acknowledgement heuristics.
+Settings and previous recovery remain accessible. Fractional journal timestamps
+decode correctly.
+
+Checks: 142 rebuild Python tests, outer safety/JXA checks, original SwiftUI-model
+checks and real bridge JSON decoded by the Swift models (fake OS, real journal).
+Production/dev bundles compile and signatures verify. Original parking UI was
+visually inspected using a running fake-data preview. No current user window
+was parked, interrupted or closed during this repair. This is not a new live
+end-to-end Park All acceptance claim.
+
+Local installation — 2026-10-13
+-------------------------------
+Version 0.4.0 is installed at the existing app path and bundle identity. Installed
+bundle files match the signed production build; recovery files retain their
+pre-install hashes. The previous 0.3.0 app is backed up. Final installed-app live
+UI inspection could not complete: the Mac locked and macOS held the iTerm
+Automation request. The app was quit cleanly to stop that pending inspection;
+reopen normally after unlocking. No terminal windows were changed. The earlier
+successful 11-tab read-only identity check and fake-data UI preview are separate
+evidence, not an installed-app end-to-end claim.

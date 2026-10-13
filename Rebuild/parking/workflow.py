@@ -98,7 +98,7 @@ class Workflow:
                 self.store.transition(record, Phase.CLOSING, {'kind':'close'})
         self.store.transition(record, Phase.PARKED)
 
-    def reconcile_record(self, record, snapshot):
+    def reconcile_record(self, record, snapshot, finish_closing=True):
         source = Window.decode(record['source'])
         intent = record['intent']
         if intent and intent['kind'] == 'stop_client':
@@ -122,16 +122,16 @@ class Workflow:
                 record['targets'][str(intent['index'])] = target
                 self.store.transition(record, Phase.CHECKING)
         if record['phase'] in (Phase.CLOSING.value, Phase.SAVED.value) and Verifier.source_absent(record, snapshot):
-            self.confirm_closed(record)
+            if finish_closing: self.confirm_closed(record)
         elif record['phase'] in (Phase.OPENING.value, Phase.CHECKING.value, Phase.SAVED.value) and Verifier.returned(record, snapshot):
             self.store.transition(record, Phase.RETURNED)
         return record
 
-    def reconcile(self, record_id):
+    def reconcile(self, record_id, read_only=False):
         initial = self.store.load(record_id)
         with self.store.operation(initial['source']['window_id']):
             record = self.store.load(record_id)
-            return self.reconcile_record(record, self.observer.observe())
+            return self.reconcile_record(record, self.observer.observe(), finish_closing=not read_only)
 
     def reopen(self, record_id):
         initial = self.store.load(record_id)

@@ -2,12 +2,12 @@
 
 # Free Parking
 
-A local macOS app for putting an **explicitly selected iTerm window** away and
+A local macOS app for putting your **iTerm windows** away and
 resuming its Claude, Codex, idle folder and plain `caffeinate` tabs in their original order.
 
-The current app is a fresh subsystem implementation in `Rebuild/`. The old car UI
-and backend remain in source history and the legacy source directories for
-comparison; the default build now uses the new core.
+The original parking-lot/car interface in `Sources/FreeParking/` runs on the fresh
+subsystem implementation in `Rebuild/`. The legacy backend is kept for comparison
+only and is not bundled in the app.
 
 ## Build and install
 
@@ -33,19 +33,25 @@ application.
 
 ## Use
 
-1. Select the window, then **Park selected window**. Recovery is persisted before
-   any task interruption or close. Normal iTerm close confirmations remain on.
-2. Select its parked entry and **Reopen saved window**. Exact conversation IDs,
-   folders, provider, grouping and tab order are verified. Confirmed returns leave
-   the parked list; recovery remains under **Show retained backups**.
-3. Hover over a row for all saved tab names. Titles are display-only and never
-   used to decide which conversation to close or resume.
-4. **Settings…** controls whether a task that Free Parking actually interrupted
-   receives `please continue` on reopening; the message is editable. Idle tasks
-   receive no message. Native agent permissions are not escalated.
+1. Click **Park my windows**. Every window's recovery is saved and verified before
+   the first interruption or close. Normal iTerm close confirmations remain on.
+   An unresolved tab blocks the batch before anything closes.
+2. **Review windows** lists every window and its tab names, including exact
+   identification problems. You can also park one identified window there.
+3. Click a parked car to reopen it. Exact conversation IDs, folders, grouping and
+   tab order are verified. Confirmed returns leave the parking lot; recovery stays
+   in the archive. Hover over a car to see its saved tab names.
+4. The **settings gear** controls whether a task that Free Parking actually
+   interrupted receives `please continue` on reopening; the message is editable.
+   Idle tasks receive no message. Native agent permissions are not escalated.
 
-No Park All, terminal typing, shared-daemon kills, background hooks, or iTerm
-preference changes. Split panes, unrelated foreground programs, and ambiguous
+Titles are display-only, never identity. Codex subagents sharing a parent's
+terminal endpoint are associated through explicit native parent relationships;
+unrelated conversations remain ambiguous. Refresh is read-only with respect to
+terminals and agents.
+
+No terminal typing, shared-daemon kills, background hooks, or iTerm preference
+changes. Split panes, unrelated foreground programs, and ambiguous
 agent identities are deliberately not supported. A manually reopened conversation
 is not automatically adopted or duplicated. Lost acknowledgements remain pending
 rather than risking another launch/message. This is at-most-once launch behavior,
@@ -56,7 +62,7 @@ not guaranteed message delivery after every crash.
 The new journal is private local SQLite under
 `~/Library/Application Support/Free Parking/Recovery-v2/`.
 Legacy recovery under `~/Library/Application Support/Car Park/` is **unchanged**;
-**Previous recovery…** opens that folder. Legacy cars are not silently imported or
+**Garage → Show Previous Recovery Files** opens that folder. Legacy cars are not silently imported or
 resolved by title. The backed-up previous app can still access them. Keep these
 backups if old parked sessions remain.
 

@@ -5,6 +5,8 @@ struct GarageView: View {
     var exporting = false
     @State private var page = 0
     @State private var showingProblem = false
+    @State private var showingWindows = false
+    @State private var showingSettings = false
     private let pageSize = 2
     private var pageCount: Int { max(1, (garage.displayedCars.count + pageSize - 1) / pageSize) }
     private var visibleCars: [ParkedCar] { Array(garage.displayedCars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
@@ -18,6 +20,10 @@ struct GarageView: View {
                     Text(garage.hasScanned ? "iTerm · \(garage.windows.count) \(garage.windows.count == 1 ? "window" : "windows") · \(garage.windows.reduce(0) { $0 + $1.tabs.count }) tabs" : "")
                         .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
                     Spacer()
+                    if !garage.windows.isEmpty {
+                        Button(garage.windows.contains(where: { !$0.canPark }) ? "Review tabs needing attention" : "Review windows") { showingWindows = true }
+                            .foregroundStyle(garage.windows.contains(where: { !$0.canPark }) ? ParkingStyle.warning : ParkingStyle.secondary)
+                    }
                     if pageCount > 1 {
                         Button { page = max(0, page - 1) } label: { Image(systemName: "chevron.left") }
                             .disabled(page == 0)
@@ -53,6 +59,8 @@ struct GarageView: View {
         .sheet(item: $garage.selectedCar) { CarDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.recoveryCar) { RecoveryDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.selectedWindow) { WindowDetails(window: $0).environmentObject(garage) }
+        .sheet(isPresented: $showingWindows) { WindowReview().environmentObject(garage) }
+        .sheet(isPresented: $showingSettings) { ContinuationSettings(value: garage.preferences).environmentObject(garage) }
         .sheet(isPresented: $showingProblem) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Details").font(.system(size: 20, weight: .semibold))
@@ -82,6 +90,9 @@ struct GarageView: View {
             Button { garage.scan() } label: { Image(systemName: "arrow.clockwise").frame(width: 28, height: 28) }
                 .buttonStyle(.plain).disabled(garage.busy).help("Refresh window count")
                 .accessibilityLabel("Refresh window count")
+            Button { showingSettings = true } label: { Image(systemName: "gearshape").frame(width: 28, height: 28) }
+                .buttonStyle(.plain).disabled(garage.busy).help("Continuation settings")
+                .accessibilityLabel("Continuation settings")
             ArchiveButton()
         }
         .padding(.bottom, 2)
@@ -363,5 +374,61 @@ private struct ArchiveButton: View {
         .accessibilityLabel("Archived cars")
         .accessibilityValue(garage.archiveAcknowledged ? "Car archived" : "")
         .accessibilityIdentifier("show-archive")
+    }
+}
+
+
+private struct WindowReview: View {
+    @EnvironmentObject private var garage: Garage
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Your open windows").font(.system(size: 21, weight: .semibold))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    ForEach(garage.windows) { window in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(window.title).font(.headline).lineLimit(1)
+                                Spacer()
+                                Text("\(window.tabs.count) tabs").foregroundStyle(ParkingStyle.secondary)
+                            }
+                            ForEach(window.tabs) { tab in
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(tab.index + 1). \(tab.displayTitle)").font(.system(size: 13)).lineLimit(2)
+                                    if !tab.issue.isEmpty { Text(tab.issue).font(.system(size: 12)).foregroundStyle(ParkingStyle.warning) }
+                                }
+                            }
+                            Button("Park this window") { dismiss(); garage.park(window) }
+                                .buttonStyle(ParkingButtonStyle()).disabled(!window.canPark || garage.busy)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 350)
+            Text("Unidentified tabs stay visible and remain open. No conversation is guessed.")
+                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+            HStack { Spacer(); Button("Done") { dismiss() }.buttonStyle(ParkingButtonStyle(prominent: true)) }
+        }.padding(22).frame(width: 540).foregroundStyle(ParkingStyle.ink).background(ParkingStyle.background)
+    }
+}
+
+private struct ContinuationSettings: View {
+    @EnvironmentObject private var garage: Garage
+    @Environment(\.dismiss) private var dismiss
+    @State var value: ParkingPreferences
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Resume interrupted tasks").font(.system(size: 21, weight: .semibold))
+            Toggle("Automatically continue tasks Free Parking stopped", isOn: $value.autoContinueInterrupted)
+            TextField("Continuation message", text: $value.continueMessage).textFieldStyle(.roundedBorder)
+            Text("Sent once on reopening only when a running task was confirmed interrupted. Idle sessions are left alone.")
+                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }.buttonStyle(ParkingButtonStyle())
+                Button("Save") { garage.savePreferences(value); dismiss() }.buttonStyle(ParkingButtonStyle(prominent: true))
+                    .disabled(value.continueMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(22).frame(width: 500).foregroundStyle(ParkingStyle.ink).background(ParkingStyle.background)
     }
 }

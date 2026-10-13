@@ -16,7 +16,9 @@ GROUPS={
     'agents':[[sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_agents.py','-v'],
               [sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_codex_identity.py','-v'],
               [sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_codex_transport.py','-v']],
-    'integration':[[sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_lab.py','-v']],
+    'integration':[['bash','scripts/test-garage-contract.sh'],
+                   [sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_garage.py','-v'],
+                   [sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_lab.py','-v']],
     'safety':[[sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_cleanup.py','-v'],
               [sys.executable,'-m','unittest','discover','-s','tests','-p','test_test_safety.py','-v'],
               [sys.executable,'-m','unittest','discover','-s','Rebuild/tests','-p','test_confirmation.py','-v']],
@@ -26,7 +28,7 @@ GROUPS={
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--suite',choices=['all',*GROUPS],default='all')
-    parser.add_argument('--build',action='store_true',help='Also build the separate app and run its non-GUI self-test.')
+    parser.add_argument('--build',action='store_true',help='Also build the separate app and native test tools.')
     parser.add_argument('--output',type=Path)
     args=parser.parse_args()
     output=args.output or ROOT/'.local/Verification'/('rebuild-check-'+datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ'))

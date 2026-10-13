@@ -1,7 +1,8 @@
 """Join native conversation MCP endpoints to kernel-owned TUI listening sockets.
 
 No display text, command-line resume IDs, timestamps, or 'latest' heuristics.
-A TUI serving several loaded conversations is ambiguous and is not parked.
+Explicit native subagent ancestry distinguishes one TUI owner from its workers.
+Several unrelated root conversations remain ambiguous and are not parked.
 """
 from urllib.parse import urlsplit
 import uuid
@@ -60,6 +61,37 @@ class CodexIdentity:
             raise Uncertain('Codex changed its loaded conversations during inspection.')
         return result
 
+    def owning_thread(self, matches):
+        """Collapse only explicit native subagent relationships, never titles/forks."""
+        if len(matches) == 1: return matches[0][0]
+        if not matches: return None
+        parents = {}
+        for sid, _ in matches:
+            thread = self.rpc.call('thread/read', dict(threadId=sid, includeTurns=False))['thread']
+            if thread.get('id') != sid: raise Uncertain('Native Codex ancestry identity changed.')
+            source = thread.get('source')
+            if isinstance(source, str) and source in ('cli', 'vscode', 'exec', 'appServer'):
+                parents[sid] = None
+            elif isinstance(source, dict):
+                subagent = source.get('subAgent')
+                if not isinstance(subagent, dict): return None
+                spawn = subagent.get('thread_spawn')
+                if not isinstance(spawn, dict): return None
+                parent = spawn.get('parent_thread_id')
+                if not isinstance(parent, str): return None
+                uuid.UUID(parent)
+                parents[sid] = parent
+            else: return None
+        roots = [sid for sid, parent in parents.items() if parent is None]
+        if len(roots) != 1: return None
+        root = roots[0]
+        for sid in parents:
+            seen = set()
+            while sid != root:
+                if sid in seen or sid not in parents: return None
+                seen.add(sid); sid = parents[sid]
+        return root
+
     def resolve(self, process):
         listeners = self.processes.loopback_listeners(process.pid)
         if not listeners:
@@ -67,9 +99,9 @@ class CodexIdentity:
         inventory = self._snapshot if self._snapshot is not None else self.inventory()
         if self._observing: self._snapshot = inventory
         matches = [(sid, origin) for sid, origin in inventory.items() if origin in listeners]
-        if len(matches) != 1:
+        sid = self.owning_thread(matches)
+        if sid is None:
             raise ParkingError('Codex endpoint does not identify exactly one loaded conversation. Nothing guessed or closed.')
-        sid, origin = matches[0]
         if ((not self._observing and self.inventory() != inventory)
                 or self.processes.loopback_listeners(process.pid) != listeners):
             raise Uncertain('Codex changed conversations or endpoint during inspection.')

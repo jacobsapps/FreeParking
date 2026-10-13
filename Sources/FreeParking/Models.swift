@@ -39,6 +39,7 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
     var restoredTargets: [String: RestoredTarget]? = nil
     var pendingTab: Int? = nil
     var boundsPending: Bool? = nil
+    var returnVerified: Bool? = nil
 
     struct RestoredTarget: Decodable, Sendable {
         let windowId: String
@@ -70,7 +71,11 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
         return tabs.first?.folder ?? "Saved window"
     }
 
-    var date: Date { ISO8601DateFormatter().date(from: createdAt) ?? .distantPast }
+    var date: Date {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: createdAt) ?? ISO8601DateFormatter().date(from: createdAt) ?? .distantPast
+    }
     var statusLabel: String {
         if allLaunchesRecorded { return "Opened · awaiting check" }
         switch status {
@@ -81,14 +86,22 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
         default: return "Needs attention"
         }
     }
-    var needsAttention: Bool { !["parked", "restored"].contains(status) && !allLaunchesRecorded }
-    var hasReturned: Bool { status == "restored" || allLaunchesRecorded }
+    var needsAttention: Bool {
+        if let returnVerified { return status != "parked" && !returnVerified }
+        return !["parked", "restored"].contains(status) && !allLaunchesRecorded
+    }
+    var hasReturned: Bool { returnVerified ?? (status == "restored" || allLaunchesRecorded) }
     var commands: String { tabs.compactMap(\.resumeCommand).joined(separator: "\n\n") }
 
     func withStatus(_ status: String, note: String) -> ParkedCar {
         ParkedCar(id: id, createdAt: createdAt, status: status, note: note, tabs: tabs, filePath: filePath, windowTitle: windowTitle,
-                  restoredTargets: restoredTargets, pendingTab: pendingTab, boundsPending: boundsPending)
+                  restoredTargets: restoredTargets, pendingTab: pendingTab, boundsPending: boundsPending, returnVerified: returnVerified)
     }
+}
+
+struct ParkingPreferences: Codable, Sendable {
+    var autoContinueInterrupted: Bool = true
+    var continueMessage: String = "please continue"
 }
 
 struct BackendResponse: Decodable, Sendable {
@@ -101,6 +114,7 @@ struct BackendResponse: Decodable, Sendable {
     let errorCode: String?
     let archives: [ParkedCar]?
     let verifiedArchivedIds: [String]?
+    var settings: ParkingPreferences? = nil
 }
 
 enum LocalBackend {
@@ -114,12 +128,12 @@ enum LocalBackend {
         guard !PreviewMode.enabled else {
             throw BackendError("Terminal access is disabled in the UI preview.")
         }
-        guard let script = Bundle.main.url(forResource: "freeparking", withExtension: "py") else {
+        guard let script = Bundle.main.resourceURL?.appendingPathComponent("rebuild/garage_backend.py"), FileManager.default.fileExists(atPath: script.path) else {
             throw BackendError("The local helper is missing. Build the .app with scripts/build-app.sh; do not run the Swift executable directly.")
         }
         // Ask in the app's own identity before a timed helper call. The first
         // macOS consent dialog may stay open longer than a discovery timeout.
-        if !["list", "remove", "unarchive"].contains(arguments.first ?? ""),
+        if !["list", "settings", "remove", "unarchive"].contains(arguments.first ?? ""),
            !NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").isEmpty {
             let target = NSAppleEventDescriptor(bundleIdentifier: "com.googlecode.iterm2")
             let status = AEDeterminePermissionToAutomateTarget(target.aeDesc, typeWildCard, typeWildCard, true)
@@ -130,7 +144,7 @@ enum LocalBackend {
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
-        let scopeArguments = testScope.map { ["--test-scope", $0] } ?? []
+        let scopeArguments = testScope.map { ["--test-scope", $0] } ?? ["--live"]
         process.arguments = [script.path] + scopeArguments + arguments
         let output = Pipe()
         process.standardOutput = output
@@ -195,6 +209,7 @@ final class Garage: ObservableObject {
         (cars + departingCars.filter { old in !cars.contains { $0.id == old.id } })
             .sorted { $0.createdAt > $1.createdAt }
     }
+    @Published var preferences = ParkingPreferences()
     @Published var windows: [LiveWindow] = []
     @Published var busy = false
     @Published var activity = ""
@@ -227,6 +242,11 @@ final class Garage: ObservableObject {
             return
         }
         perform(["scan"], activity: "Reading iTerm windows…")
+    }
+    func savePreferences(_ value: ParkingPreferences) {
+        let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
+        guard let data = try? encoder.encode(value), let json = String(data: data, encoding: .utf8) else { return }
+        perform(["settings", json], activity: "Saving settings…")
     }
     func scan() {
         guard !busy else { return }
@@ -391,10 +411,11 @@ final class Garage: ObservableObject {
                 }
                 withAnimation(.easeOut(duration: 0.2)) { cars = response.cars }
                 archives = response.archives ?? []
-                if arguments.first == "scan" {
+                if let settings = response.settings { preferences = settings }
+                if arguments.first == "scan" || arguments.first == "park-all" {
                     windows = response.windows
-                    hasScanned = response.ok
-                } else if arguments.first != "list" {
+                    hasScanned = response.ok || !response.windows.isEmpty
+                } else if !["list", "settings"].contains(arguments.first ?? "") {
                     // Do not show stale live-window buttons after a mutation.
                     windows = []
                     hasScanned = false
@@ -443,6 +464,13 @@ final class Garage: ObservableObject {
     }
     func revealGarage() {
         guard !isPreview else { message = "Preview mode does not read or write your recovery files."; return }
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Free Parking/Recovery-v2")
+        if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) }
+    }
+
+    func revealPreviousRecovery() {
+        guard !isPreview else { return }
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Car Park")
         if FileManager.default.fileExists(atPath: url.path) { NSWorkspace.shared.open(url) }
