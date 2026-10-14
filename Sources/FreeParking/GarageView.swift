@@ -9,7 +9,6 @@ struct GarageView: View {
     @State private var showingSettings = false
     private let pageSize = 2
     private var hasUnresolvedTabs: Bool { garage.windows.contains { !$0.canPark && !$0.canConfirm } }
-    private var needsSessionConfirmation: Bool { garage.windows.contains(where: \.canConfirm) }
     private var pageCount: Int { max(1, (garage.displayedCars.count + pageSize - 1) / pageSize) }
     private var visibleCars: [ParkedCar] { Array(garage.displayedCars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
 
@@ -23,7 +22,7 @@ struct GarageView: View {
                         .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
                     Spacer()
                     if !garage.windows.isEmpty {
-                        Button(hasUnresolvedTabs ? "Review unidentified tabs" : needsSessionConfirmation ? "Review resumed session" : "Review windows") { showingWindows = true }
+                        Button(hasUnresolvedTabs ? "Review unidentified tabs" : "Review windows") { showingWindows = true }
                             .foregroundStyle(hasUnresolvedTabs ? ParkingStyle.warning : ParkingStyle.secondary)
                     }
                     if pageCount > 1 {
@@ -51,11 +50,6 @@ struct GarageView: View {
         }
         .foregroundStyle(ParkingStyle.ink)
         .task { garage.load() }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // A CLI may need more than a few seconds to publish its identity.
-            // Recheck on return to the app; no daemon or continuous polling.
-            if !garage.isPreview { garage.scan() }
-        }
         .onChange(of: garage.displayedCars.count) { _, _ in page = min(page, pageCount - 1) }
         .sheet(isPresented: $garage.showingArchive) { ArchiveView().environmentObject(garage) }
         .sheet(item: $garage.selectedCar) { CarDetails(car: $0).environmentObject(garage) }

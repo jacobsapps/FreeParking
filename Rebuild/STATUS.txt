@@ -224,3 +224,17 @@ The confirmation sheet was inspected with fictional preview data. Python
 regressions, Swift model/bridge checks and outer safety/JXA checks pass. No
 working tab was parked, interrupted, typed into or closed; confirmed parking
 was exercised with fake OS calls and real recovery storage, not those windows.
+
+Focus-refresh cleanup — 2026-10-14
+---------------------------------
+Removed the app-activation observer that scanned on every return to Free Parking.
+Initial loading is idempotent; explicit refresh and pre-mutation safety checks
+remain. Resumed-session confirmation stays available when parking and in tab
+review, but no longer creates a standing home-screen footer or special link.
+Actual unsupported tabs still retain actionable diagnostics.
+
+Version 0.4.2 installed and native view visually inspected: clean home screen
+with Park my windows and ordinary Review windows. Two hide/reactivate cycles of
+Free Parking completed without an observed backend launch. 155 backend tests
+and Swift UI-model/bridge checks pass. Existing recovery hashes unchanged; no
+terminal actions were performed.

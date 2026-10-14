@@ -53,8 +53,11 @@ saved session for **explicit confirmation**, never silently treats the launch
 command as current identity. Check the listed name/folder/UUID; cancel if you
 switched conversations inside the tab. Confirmation is single-use, expires after
 two minutes, and is bound to the terminal, process birth and window layout.
-Other unknown jobs cannot be confirmed away. Refresh is read-only with respect
-to terminals and agents.
+Other unknown jobs cannot be confirmed away. Confirmation appears only when
+parking, not as a standing home-screen notice. The app scans once on launch;
+refocusing it or reattaching its view does not scan again. Use Refresh for an
+updated inventory. Parking still performs a fresh safety check. Refresh is
+read-only with respect to terminals and agents.
 
 No terminal typing, shared-daemon kills, background hooks, or iTerm preference
 changes. Split panes, unrelated foreground programs, and ambiguous

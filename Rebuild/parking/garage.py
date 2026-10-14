@@ -100,9 +100,9 @@ def dispatch(arguments, root=DEFAULT_ROOT):
                     except Exception as e:reply['warnings'].append(str(e))
             if snapshot.issues:
                 reply['message']='\n'.join(
-                    ('“'+tab['title']+'” is a resumed Codex tab. Parking will ask you to confirm its saved session.'
-                     if tab.get('needs_confirmation') else '“'+tab['title']+'”: '+tab['issue'])
-                    for window in reply['windows'] for tab in window['tabs'] if tab['issue'])
+                    '“'+tab['title']+'”: '+tab['issue']
+                    for window in reply['windows'] for tab in window['tabs']
+                    if tab['issue'] and not tab.get('needs_confirmation'))
         elif action in ('park-all','park','park-confirmed'):
             from .confirmation import prepare, accept
             if action == 'park-confirmed':

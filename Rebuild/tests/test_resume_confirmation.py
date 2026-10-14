@@ -108,12 +108,16 @@ class ConfirmationDispatchTests(unittest.TestCase):
         candidate=dict(terminal_id=tab.terminal_id,process=asdict(tab.process),command='/bin/codex resume '+str(uuid.uuid4()),
                        session_id=str(uuid.uuid4()),cwd=tab.cwd,name='Saved session')
         pending=replace(base,windows=(),issues={'fixture':'Confirm'},
-                        tab_issues={tab.terminal_id:'Confirm'},confirmation_candidates={tab.terminal_id:candidate})
+                        tab_issues={tab.terminal_id:'Confirm'},confirmation_candidates={tab.terminal_id:candidate},
+                        resolved_tabs={t.terminal_id:t for t in self.desktop.source.tabs[1:]})
         provider=SimpleNamespace(confirmed_resumes={})
         self.desktop.providers=Mock();self.desktop.providers.get.return_value=provider
         original=self.desktop.observe
         self.desktop.observe=lambda: original() if provider.confirmed_resumes else pending
         with patch('parking.garage.compose',return_value=(self.store,self.desktop,self.flow)):
+            scan=dispatch(['scan'])
+            self.assertEqual(scan['message'],'')
+            self.assertTrue(any(t['needs_confirmation'] for w in scan['windows'] for t in w['tabs']))
             reply=dispatch(['--live','park-all'])
             self.assertTrue(reply['ok']);self.assertIsNotNone(reply['confirmation'])
             self.assertEqual(self.desktop.calls,[]);self.assertEqual(self.store.all(),[])

@@ -215,7 +215,7 @@ enum QuitPolicy {
 @MainActor
 final class Garage: ObservableObject {
     let isPreview = PreviewMode.enabled
-    private var previewLoaded = false
+    private var loadedOnce = false
     private var activeOperation: String?
     var mustFinishBeforeQuitting: Bool { QuitPolicy.mustWait(operation: activeOperation, busy: busy) }
     @Published var cars: [ParkedCar] = []
@@ -257,9 +257,10 @@ final class Garage: ObservableObject {
     }
 
     func load() {
+        // View reattachment is not a request to refresh the terminal inventory.
+        guard !loadedOnce else { return }
+        loadedOnce = true
         if isPreview {
-            guard !previewLoaded else { return }
-            previewLoaded = true
             loadPreview()
             return
         }

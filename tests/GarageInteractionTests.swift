@@ -21,6 +21,9 @@ struct GarageInteractionTests {
         let garage = Garage()
         garage.load()
         garage.cars = [a, b]
+        garage.windows = []
+        garage.load() // Reattaching the view cannot reload/replace state.
+        precondition(garage.cars.map(\.id) == [a.id,b.id] && garage.windows.isEmpty)
 
         // Legacy recovery journals can record every launch and still say
         // "restoring" when only title readback failed. Do not report missing tabs.
