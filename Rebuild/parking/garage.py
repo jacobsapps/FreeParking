@@ -27,6 +27,8 @@ def live_windows(snapshot):
                 if tab: tabs.append(tab_view(tab,len(tabs),issue))
                 else: tabs.append(dict(index=len(tabs),title=session.get('title',''),terminal_id=session['id'],
                     provider='unknown',session_id='',cwd='',issue=issue or snapshot.issues.get(raw['id'],'Identification pending.'),resume_command=None))
+        for tab in tabs:
+            tab['needs_confirmation'] = tab['terminal_id'] in snapshot.confirmation_candidates
         result.append(dict(id=raw['id'],title=tabs[0]['title'] if tabs else 'Empty window',tabs=tabs,
             can_park=window is not None,fingerprint=window.fingerprint if window else ''))
     return result
@@ -54,8 +56,8 @@ def car_view(record, root):
         pending_tab=record['intent'].get('index') if record.get('intent') else None)
 
 
-def park_all(store, observer, workflow):
-    snapshot=observer.observe()
+def park_all(store, observer, workflow, snapshot=None):
+    snapshot=snapshot or observer.observe()
     if snapshot.issues:
         raise ParkingError('Nothing closed. Review the highlighted tabs before parking.')
     windows=list(snapshot.windows)
@@ -82,7 +84,7 @@ def dispatch(arguments, root=DEFAULT_ROOT):
     store,observer,workflow=compose(root,scope_path=scope,live=live)
     root=store.root
     reply=dict(ok=True,windows=[],cars=[],archives=[],warnings=[],message='',error=None,
-               error_code=None,verified_archived_ids=[],settings=Settings(root).read())
+               error_code=None,confirmation=None,verified_archived_ids=[],settings=Settings(root).read())
     action=args[0] if args else 'list'
     try:
         if action not in ('list','scan','settings') and not (live or scope):
@@ -96,15 +98,33 @@ def dispatch(arguments, root=DEFAULT_ROOT):
                 if record['phase']!='returned':
                     try:workflow.reconcile(record['id'],read_only=True)
                     except Exception as e:reply['warnings'].append(str(e))
-            if snapshot.issues:reply['message']='Some tabs need attention. Review windows for the exact details.'
-        elif action=='park-all':
-            results=park_all(store,observer,workflow)
-            if results and results[-1]['phase']!='parked':
-                reply.update(ok=False,error=results[-1].get('issue') or 'Parking is still being checked; recovery is retained.')
-            reply['windows']=live_windows(observer.observe())
-        elif action=='park':
-            record=workflow.park(args[1],args[2])
-            if record['phase']!='parked':reply.update(ok=False,error=record.get('issue') or 'Parking is unconfirmed.')
+            if snapshot.issues:
+                reply['message']='\n'.join(
+                    ('“'+tab['title']+'” is a resumed Codex tab. Parking will ask you to confirm its saved session.'
+                     if tab.get('needs_confirmation') else '“'+tab['title']+'”: '+tab['issue'])
+                    for window in reply['windows'] for tab in window['tabs'] if tab['issue'])
+        elif action in ('park-all','park','park-confirmed'):
+            from .confirmation import prepare, accept
+            if action == 'park-confirmed':
+                window_id = accept(root,args[1],observer)
+                snapshot = observer.observe()
+            else:
+                window_id = args[1] if action == 'park' else None
+                snapshot = observer.observe()
+                reply['confirmation'] = prepare(root,snapshot,window_id)
+            if reply['confirmation'] is None:
+                if window_id is None:
+                    results=park_all(store,observer,workflow,snapshot)
+                else:
+                    window=snapshot.window(window_id)
+                    if window is None: raise ParkingError('This window has unidentified tabs. Review its tab details; nothing closed.')
+                    fingerprint=window.fingerprint if action=='park-confirmed' else args[2]
+                    results=[workflow.park(window_id,fingerprint)]
+                if results and results[-1]['phase']!='parked':
+                    reply.update(ok=False,error=results[-1].get('issue') or 'Parking is still being checked; recovery is retained.')
+                reply['windows']=live_windows(observer.observe())
+            else:
+                reply['windows']=live_windows(snapshot)
         elif action=='restore':
             record=workflow.reopen(args[1])
             if record['phase']!='returned':reply.update(ok=False,error=record.get('issue') or 'Opening is being checked. Nothing was duplicated.')
@@ -119,7 +139,7 @@ def dispatch(arguments, root=DEFAULT_ROOT):
     except Exception as error:
         reply.update(ok=False,error=str(error))
         # Rejected Park All must still offer per-tab diagnostic review.
-        if action=='park-all':
+        if action in ('park-all','park','park-confirmed'):
             try:reply['windows']=live_windows(observer.observe())
             except Exception:pass
     for record in store.all():

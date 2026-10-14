@@ -197,3 +197,30 @@ Automation request. The app was quit cleanly to stop that pending inspection;
 reopen normally after unlocking. No terminal windows were changed. The earlier
 successful 11-tab read-only identity check and fake-data UI preview are separate
 evidence, not an installed-app end-to-end claim.
+
+
+Resumed-session confirmation — 2026-10-14
+-----------------------------------------
+The current manually resumed Codex client owns a new endpoint while its loaded
+conversation still reports the old, dead one. The subagent fix cannot identify
+that client automatically. No title/latest matching or daemon reload is used.
+An exact resume UUID plus native saved-thread metadata is now a suggestion for
+explicit user confirmation, not automatic identity. The UI lists the tab,
+saved session name, folder and UUID, requires an unchecked-by-default
+acknowledgement, and says to cancel after an in-tab conversation switch.
+Ordinary identified tabs do not need this step.
+
+Confirmation is single-use, expires in two minutes and rechecks window topology,
+resolved fingerprints, process birth/TTY/executable, command and folder before
+authorizing only that operation. It does not persist an identity override in
+settings. Unsupported jobs, ambiguous native endpoints and changed processes
+remain rejected. A newly created unsaved Codex conversation gets a specific
+first-message explanation rather than a raw RPC error.
+
+Version 0.4.1 installed; actual installed native view inspected after a successful
+read-only scan (two windows, nine tabs at that moment). The named resumed tab
+shows a neutral confirmation notice instead of the generic startup warning.
+The confirmation sheet was inspected with fictional preview data. Python
+regressions, Swift model/bridge checks and outer safety/JXA checks pass. No
+working tab was parked, interrupted, typed into or closed; confirmed parking
+was exercised with fake OS calls and real recovery storage, not those windows.

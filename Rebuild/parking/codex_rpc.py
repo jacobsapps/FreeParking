@@ -130,7 +130,12 @@ class CodexRPC:
     def read(self,sid):
         uuid.UUID(sid)
         thread=self.call('thread/read',dict(threadId=sid,includeTurns=False))['thread']
-        turns=self.call('thread/turns/list',dict(threadId=sid,limit=1,sortDirection='desc',itemsView='notLoaded'))
+        try:
+            turns=self.call('thread/turns/list',dict(threadId=sid,limit=1,sortDirection='desc',itemsView='notLoaded'))
+        except ParkingError as error:
+            if 'not materialized yet' in str(error):
+                raise ParkingError('This new Codex tab has no saved conversation yet. Send its first message before parking.') from error
+            raise
         thread['turns']=turns['data']
         return thread
 

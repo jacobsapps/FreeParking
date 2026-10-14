@@ -231,7 +231,25 @@ class Codex:
         if matches:
             sid=next(iter(matches));uuid.UUID(sid)
         else:
-            sid=self.identity.resolve(process)
+            from .confirmation import MissingEndpoint, ConfirmationRequired, resume_candidate, binding
+            confirmed = getattr(self, 'confirmed_resumes', {}).get(session['id'])
+            if confirmed:
+                from dataclasses import asdict
+                if (asdict(process) != confirmed['process']
+                        or self.processes.command(process.pid) != confirmed['command']
+                        or self.processes.cwd(process.pid) != confirmed['cwd']):
+                    raise ParkingError('The confirmed Codex process changed. Nothing closed.')
+            try:
+                sid=self.identity.resolve(process)
+                if confirmed and sid != confirmed['session_id']:
+                    raise ParkingError('Codex switched conversations after confirmation. Nothing closed.')
+            except MissingEndpoint:
+                candidate = resume_candidate(process, session, self.processes, self.rpc)
+                if candidate is None: raise
+                if confirmed is None: raise ConfirmationRequired(candidate)
+                if binding(candidate) != confirmed:
+                    raise ParkingError('The confirmed Codex tab changed. Nothing closed.')
+                sid = candidate['session_id']
         cwd=self.processes.cwd(process.pid)
         thread=self.rpc.read(sid)
         if thread['cwd']!=cwd:raise ParkingError('Codex process and thread folder disagree.')

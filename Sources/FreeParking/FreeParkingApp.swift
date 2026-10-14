@@ -87,7 +87,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // running app. ImageRenderer does not record the desktop.
                 if let garage {
                     let content: AnyView
-                    if PreviewMode.scene == "archive" {
+                    if PreviewMode.scene == "confirmation", let confirmation = garage.pendingConfirmation {
+                        content = AnyView(ResumeConfirmationView(confirmation: confirmation, exporting: true).environmentObject(garage))
+                    } else if PreviewMode.scene == "archive" {
                         content = AnyView(ArchiveView(exporting: true).environmentObject(garage))
                     } else if PreviewMode.scene == "details", let car = garage.cars.first {
                         content = AnyView(CarDetails(car: car, exporting: true).environmentObject(garage)

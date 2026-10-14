@@ -8,6 +8,8 @@ struct GarageView: View {
     @State private var showingWindows = false
     @State private var showingSettings = false
     private let pageSize = 2
+    private var hasUnresolvedTabs: Bool { garage.windows.contains { !$0.canPark && !$0.canConfirm } }
+    private var needsSessionConfirmation: Bool { garage.windows.contains(where: \.canConfirm) }
     private var pageCount: Int { max(1, (garage.displayedCars.count + pageSize - 1) / pageSize) }
     private var visibleCars: [ParkedCar] { Array(garage.displayedCars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
 
@@ -21,8 +23,8 @@ struct GarageView: View {
                         .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
                     Spacer()
                     if !garage.windows.isEmpty {
-                        Button(garage.windows.contains(where: { !$0.canPark }) ? "Review tabs needing attention" : "Review windows") { showingWindows = true }
-                            .foregroundStyle(garage.windows.contains(where: { !$0.canPark }) ? ParkingStyle.warning : ParkingStyle.secondary)
+                        Button(hasUnresolvedTabs ? "Review unidentified tabs" : needsSessionConfirmation ? "Review resumed session" : "Review windows") { showingWindows = true }
+                            .foregroundStyle(hasUnresolvedTabs ? ParkingStyle.warning : ParkingStyle.secondary)
                     }
                     if pageCount > 1 {
                         Button { page = max(0, page - 1) } label: { Image(systemName: "chevron.left") }
@@ -60,6 +62,9 @@ struct GarageView: View {
         .sheet(item: $garage.recoveryCar) { RecoveryDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.selectedWindow) { WindowDetails(window: $0).environmentObject(garage) }
         .sheet(isPresented: $showingWindows) { WindowReview().environmentObject(garage) }
+        .sheet(item: $garage.pendingConfirmation) { confirmation in
+            ResumeConfirmationView(confirmation: confirmation).environmentObject(garage)
+        }
         .sheet(isPresented: $showingSettings) { ContinuationSettings(value: garage.preferences).environmentObject(garage) }
         .sheet(isPresented: $showingProblem) {
             VStack(alignment: .leading, spacing: 16) {
@@ -400,7 +405,7 @@ private struct WindowReview: View {
                                 }
                             }
                             Button("Park this window") { dismiss(); garage.park(window) }
-                                .buttonStyle(ParkingButtonStyle()).disabled(!window.canPark || garage.busy)
+                                .buttonStyle(ParkingButtonStyle()).disabled((!window.canPark && !window.canConfirm) || garage.busy)
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -430,5 +435,49 @@ private struct ContinuationSettings: View {
                     .disabled(value.continueMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(22).frame(width: 500).foregroundStyle(ParkingStyle.ink).background(ParkingStyle.background)
+    }
+}
+
+struct ResumeConfirmationView: View {
+    @EnvironmentObject private var garage: Garage
+    @Environment(\.dismiss) private var dismiss
+    let confirmation: ResumeConfirmation
+    var exporting = false
+    @State private var confirmed = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if garage.isPreview { SampleBadge() }
+            Text("Confirm resumed sessions").font(.system(size: 21, weight: .semibold))
+            Text("Codex still reports an old terminal endpoint. These are the exact saved sessions used to launch the tabs below—not a title-based match.")
+                .font(.system(size: 13))
+            if exporting { entries } else { ScrollView { entries }.frame(height: min(210, CGFloat(confirmation.entries.count) * 100)) }
+            Text("If you switched conversations inside one of these tabs, cancel. Free Parking cannot detect that from the launch command.")
+                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+            Button { confirmed.toggle() } label: {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: confirmed ? "checkmark.square.fill" : "square")
+                        .foregroundStyle(confirmed ? ParkingStyle.yellow : ParkingStyle.secondary)
+                    Text("These are the conversations currently shown in those tabs")
+                }.font(.system(size: 12))
+            }.buttonStyle(.plain).accessibilityValue(confirmed ? "Checked" : "Unchecked")
+            HStack {
+                Spacer()
+                Button("Cancel") { garage.pendingConfirmation = nil; dismiss() }.buttonStyle(ParkingButtonStyle())
+                Button("Confirm and park") { garage.confirmParking(confirmation); dismiss() }
+                    .buttonStyle(ParkingButtonStyle(prominent: true)).disabled(!confirmed || garage.busy)
+            }
+        }.padding(22).frame(width: 540).foregroundStyle(ParkingStyle.ink).background(ParkingStyle.background)
+    }
+    private var entries: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            ForEach(confirmation.entries) { entry in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Window \(entry.windowNumber), tab \(entry.tabNumber) · \(entry.title)").font(.system(size: 13, weight: .semibold))
+                    Text(entry.name).font(.system(size: 13))
+                    Text(entry.cwd).font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
+                    Text(entry.sessionId).font(.system(size: 10, design: .monospaced)).foregroundStyle(ParkingStyle.secondary).textSelection(.enabled)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 }

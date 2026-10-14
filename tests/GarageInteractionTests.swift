@@ -120,6 +120,11 @@ struct GarageInteractionTests {
         unverifiedV2.returnVerified = false
         precondition(unverifiedV2.allLaunchesRecorded && !unverifiedV2.hasReturned)
         precondition(unverifiedV2.needsAttention && garage.issue(for: unverifiedV2) != nil)
+        let confirmationReply = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"confirmation":{"id":"challenge","entries":[{"terminal_id":"tab","window_number":1,"tab_number":2,"title":"Display name","name":"Saved name","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/fixture"}]}}"#.utf8))
+        precondition(confirmationReply.confirmation?.entries.first?.tabNumber == 2)
+        precondition(confirmationReply.confirmation?.entries.first?.sessionId == "11111111-1111-4111-8111-111111111111")
+        let confirmable = try decoder.decode(LiveWindow.self, from: Data(#"{"id":"w","title":"Window","can_park":false,"fingerprint":"","tabs":[{"index":0,"title":"Resumed","terminal_id":"tab","provider":"unknown","session_id":"","cwd":"","issue":"Confirm session","needs_confirmation":true}]}"#.utf8))
+        precondition(!confirmable.canPark && confirmable.canConfirm)
         let preferences = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"settings":{"auto_continue_interrupted":false,"continue_message":"continue now"}}"#.utf8))
         precondition(preferences.settings?.autoContinueInterrupted == false)
         precondition(preferences.settings?.continueMessage == "continue now")

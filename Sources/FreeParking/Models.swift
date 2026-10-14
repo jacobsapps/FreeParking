@@ -12,6 +12,7 @@ struct AgentTab: Decodable, Identifiable, Sendable {
     let cwd: String
     let issue: String
     let resumeCommand: String?
+    var needsConfirmation: Bool? = nil
 
     var id: Int { index }
     var folder: String { cwd.isEmpty ? "Unidentified tab" : (cwd as NSString).lastPathComponent }
@@ -26,6 +27,25 @@ struct LiveWindow: Decodable, Identifiable, Sendable {
     let tabs: [AgentTab]
     let canPark: Bool
     let fingerprint: String
+    var canConfirm: Bool {
+        tabs.contains { $0.needsConfirmation == true } &&
+        tabs.allSatisfy { $0.issue.isEmpty || $0.needsConfirmation == true }
+    }
+}
+
+struct ResumeConfirmation: Decodable, Identifiable, Sendable {
+    let id: String
+    let entries: [Entry]
+    struct Entry: Decodable, Identifiable, Sendable {
+        let terminalId: String
+        let windowNumber: Int
+        let tabNumber: Int
+        let title: String
+        let name: String
+        let sessionId: String
+        let cwd: String
+        var id: String { terminalId }
+    }
 }
 
 struct ParkedCar: Decodable, Identifiable, Sendable {
@@ -115,6 +135,7 @@ struct BackendResponse: Decodable, Sendable {
     let archives: [ParkedCar]?
     let verifiedArchivedIds: [String]?
     var settings: ParkingPreferences? = nil
+    var confirmation: ResumeConfirmation? = nil
 }
 
 enum LocalBackend {
@@ -210,6 +231,7 @@ final class Garage: ObservableObject {
             .sorted { $0.createdAt > $1.createdAt }
     }
     @Published var preferences = ParkingPreferences()
+    @Published var pendingConfirmation: ResumeConfirmation?
     @Published var windows: [LiveWindow] = []
     @Published var busy = false
     @Published var activity = ""
@@ -280,7 +302,7 @@ final class Garage: ObservableObject {
     }
     func park(_ window: LiveWindow) {
         guard !busy else { return }
-        guard window.canPark else { selectedWindow = window; return }
+        guard window.canPark || window.canConfirm else { selectedWindow = window; return }
         selectedWindow = nil
         if isPreview {
             withAnimation {
@@ -293,6 +315,12 @@ final class Garage: ObservableObject {
         }
         perform(["park", window.id, window.fingerprint], activity: "Saving first, then parking. Check iTerm for its close confirmation…")
     }
+    func confirmParking(_ confirmation: ResumeConfirmation) {
+        guard !busy, pendingConfirmation?.id == confirmation.id, !isPreview else { return }
+        pendingConfirmation = nil
+        perform(["park-confirmed", confirmation.id], activity: "Saving confirmed sessions, then parking…")
+    }
+
     /// Opening a car resumes its saved conversations or focuses them.
     /// It never navigates to an inspection or confirmation screen.
     func open(_ car: ParkedCar) {
@@ -399,7 +427,7 @@ final class Garage: ObservableObject {
                 let previous = cars
                 let verifiedIDs = Set(response.verifiedArchivedIds ?? [])
                 depart(previous.filter { old in verifiedIDs.contains(old.id) && !response.cars.contains(where: { $0.id == old.id }) })
-                if ["park", "park-all"].contains(arguments.first ?? "") {
+                if ["park", "park-all", "park-confirmed"].contains(arguments.first ?? "") {
                     let oldIDs = Set(previous.map(\.id))
                     for car in response.cars where !oldIDs.contains(car.id) && car.status == "parked" {
                         arrivingAt[car.id] = .now
@@ -412,7 +440,8 @@ final class Garage: ObservableObject {
                 withAnimation(.easeOut(duration: 0.2)) { cars = response.cars }
                 archives = response.archives ?? []
                 if let settings = response.settings { preferences = settings }
-                if arguments.first == "scan" || arguments.first == "park-all" {
+                pendingConfirmation = response.confirmation
+                if ["scan", "park-all", "park-confirmed"].contains(arguments.first ?? "") {
                     windows = response.windows
                     hasScanned = response.ok || !response.windows.isEmpty
                 } else if !["list", "settings"].contains(arguments.first ?? "") {
@@ -479,6 +508,13 @@ final class Garage: ObservableObject {
     private func loadPreview() {
         let sample = PreviewFixtures.cars[0]
         switch PreviewMode.scene {
+        case "confirmation":
+            windows = [PreviewFixtures.window]
+            hasScanned = true
+            pendingConfirmation = ResumeConfirmation(id: "fixture-confirmation", entries: [
+                .init(terminalId: "fixture-tab", windowNumber: 1, tabNumber: 2, title: "Website polish",
+                      name: "Refresh the portfolio", sessionId: "11111111-1111-4111-8111-111111111111", cwd: "/Users/example/Projects/Website")
+            ])
         case "ready", "window-review":
             windows = [PreviewFixtures.window]
             hasScanned = true

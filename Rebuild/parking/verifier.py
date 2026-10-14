@@ -25,7 +25,7 @@ class Observer:
         # Neither a denied permission nor an unreadable process list is 'empty'.
         raw = self.terminal.windows()
         processes = self.processes.all()
-        windows, issues, tab_issues, resolved = [], {}, {}, {}
+        windows, issues, tab_issues, resolved, candidates = [], {}, {}, {}, {}
         self.providers.begin_observation()
         try:
             for window in raw:
@@ -37,6 +37,9 @@ class Observer:
                         tab = self.providers.identify(raw_tab['sessions'][0], processes)
                         tabs.append(tab); resolved[tab.terminal_id] = tab
                     except ParkingError as error:
+                        from .confirmation import ConfirmationRequired
+                        if isinstance(error, ConfirmationRequired):
+                            candidates[error.candidate['terminal_id']] = error.candidate
                         problems.append('Tab ' + str(index + 1) + ': ' + str(error))
                         for session in raw_tab['sessions']: tab_issues[session['id']] = str(error)
                 if not window['tabs']: problems.append('Empty window.')
@@ -49,7 +52,7 @@ class Observer:
         for w in windows:
             if any(after.get(t.process.pid, {}).get('started') != t.process.started for t in w.tabs):
                 raise Uncertain('A process changed during inspection. Observe again; no mutation authorized.')
-        return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved)
+        return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved, candidates)
 
 
 class Verifier:

@@ -132,6 +132,7 @@ class Observation:
     issues: dict
     tab_issues: dict = field(default_factory=dict)
     resolved_tabs: dict = field(default_factory=dict)
+    confirmation_candidates: dict = field(default_factory=dict)
 
     @property
     def terminal_ids(self):

@@ -7,6 +7,7 @@ Several unrelated root conversations remain ambiguous and are not parked.
 from urllib.parse import urlsplit
 import uuid
 from .model import ParkingError, Uncertain
+from .confirmation import MissingEndpoint
 
 
 def loopback_origin(value):
@@ -99,6 +100,8 @@ class CodexIdentity:
         inventory = self._snapshot if self._snapshot is not None else self.inventory()
         if self._observing: self._snapshot = inventory
         matches = [(sid, origin) for sid, origin in inventory.items() if origin in listeners]
+        if not matches:
+            raise MissingEndpoint("Codex has not linked this terminal to its loaded conversation. No window was changed.")
         sid = self.owning_thread(matches)
         if sid is None:
             raise ParkingError('Codex endpoint does not identify exactly one loaded conversation. Nothing guessed or closed.')

@@ -47,8 +47,14 @@ application.
 
 Titles are display-only, never identity. Codex subagents sharing a parent's
 terminal endpoint are associated through explicit native parent relationships;
-unrelated conversations remain ambiguous. Refresh is read-only with respect to
-terminals and agents.
+unrelated conversations remain ambiguous. A warm resume can retain a dead TUI
+endpoint in Codex. For an exact `codex resume UUID` launch, parking offers that
+saved session for **explicit confirmation**, never silently treats the launch
+command as current identity. Check the listed name/folder/UUID; cancel if you
+switched conversations inside the tab. Confirmation is single-use, expires after
+two minutes, and is bound to the terminal, process birth and window layout.
+Other unknown jobs cannot be confirmed away. Refresh is read-only with respect
+to terminals and agents.
 
 No terminal typing, shared-daemon kills, background hooks, or iTerm preference
 changes. Split panes, unrelated foreground programs, and ambiguous
