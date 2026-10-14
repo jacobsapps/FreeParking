@@ -234,7 +234,7 @@ review, but no longer creates a standing home-screen footer or special link.
 Actual unsupported tabs still retain actionable diagnostics.
 
 Version 0.4.2 installed and native view visually inspected: clean home screen
-with Park my windows and ordinary Review windows. Two hide/reactivate cycles of
-Free Parking completed without an observed backend launch. 155 backend tests
+with Park my windows and ordinary Review windows. Activation smoke checks observed no backend launch; hide() returned false, so
+these are not claimed as completed hide/refocus cycles. 155 backend tests
 and Swift UI-model/bridge checks pass. Existing recovery hashes unchanged; no
 terminal actions were performed.
