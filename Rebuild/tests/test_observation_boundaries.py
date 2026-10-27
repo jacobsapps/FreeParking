@@ -167,9 +167,30 @@ class ObservationBoundaries(unittest.TestCase):
         store = Mock(); store.verify.return_value = record
         observer = Mock(); observer.observe.return_value = snapshot
         provider = Mock(); providers = Mock(); providers.get.return_value = provider
+        submitted = []
+        def archive(tab, value, authorize):
+            authorize(tab.session_id)
+            submitted.append(value)
+        provider.set_archived.side_effect = archive
         gate = Gate(store, observer, Mock(), providers, mutations_enabled=True)
         with self.assertRaises(ParkingError): gate.native_archive('durable receipt')
-        provider.set_archived.assert_not_called()
+        self.assertEqual(submitted, [])
+
+    def test_shutdown_rechecks_source_at_the_actual_signal_boundary(self):
+        snapshot = self.observer.observe()
+        record = dict(source=Window('partial', (self.live,)).encode(), phase='closing',
+            intent=dict(kind='stop_client', index=0))
+        store = Mock(); store.verify.return_value = record
+        observer = Mock(); observer.observe.return_value = snapshot
+        provider = Mock(); providers = Mock(); providers.get.return_value = provider
+        submitted = []
+        def finish(tab, authorize):
+            authorize()
+            submitted.append(tab.process.pid)
+        provider.finish_close.side_effect = finish
+        gate = Gate(store, observer, Mock(), providers, mutations_enabled=True)
+        with self.assertRaises(ParkingError): gate.stop_closed_client('durable receipt')
+        self.assertEqual(submitted, [])
 
     def test_unresolved_tab_is_still_present_for_source_absence(self):
         self.binding_failures[101] = 'Target endpoint changed'

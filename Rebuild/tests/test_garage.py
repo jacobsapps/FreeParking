@@ -92,3 +92,21 @@ class GarageTests(unittest.TestCase):
         with patch.object(self.flow,'confirm_closed',side_effect=AssertionError('Must not mutate an agent')):
             result=self.flow.reconcile(record['id'],read_only=True)
         self.assertEqual(result['phase'],'closing');self.assertEqual(self.desktop.calls,[])
+
+    def test_refresh_streams_saved_cars_and_reads_the_desktop_once(self):
+        park_all(self.store,self.desktop,self.flow)
+        updates = []
+        with patch('parking.garage.compose',return_value=(self.store,self.desktop,self.flow)), \
+             patch.object(self.desktop,'observe',wraps=self.desktop.observe) as observe:
+            reply = dispatch(['--live','scan'], progress=lambda record: updates.append((record['id'],observe.call_count)))
+        self.assertTrue(reply['ok'])
+        self.assertEqual(observe.call_count,1)
+        self.assertEqual(len(updates),2)
+        self.assertTrue(all(count==0 for _,count in updates))
+        self.assertEqual(len(reply['cars']),2)
+
+    def test_mutating_reconciliation_cannot_reuse_a_refresh_snapshot(self):
+        record,_=self.store.begin(self.first)
+        with self.assertRaises(ParkingError):
+            self.flow.reconcile(record['id'],snapshot=self.desktop.observe())
+        self.assertEqual(self.desktop.calls,[])

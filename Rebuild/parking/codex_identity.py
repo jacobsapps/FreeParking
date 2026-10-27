@@ -4,6 +4,8 @@ No display text, command-line resume IDs, timestamps, or 'latest' heuristics.
 Explicit native subagent ancestry distinguishes one TUI owner from its workers.
 Several unrelated root conversations remain ambiguous and are not parked.
 """
+from .diagnostics import timed, event
+
 from urllib.parse import urlsplit
 import uuid
 from .model import ParkingError, Uncertain
@@ -49,9 +51,12 @@ class CodexIdentity:
             if not self._bindings: return {}
             latest = self.inventory()
             failures = {}
+            fresh = getattr(type(self.processes), 'fresh_listeners', None)
+            endpoints = fresh(self.processes, list(self._bindings)) if fresh else None
+            processes = self.processes.all()
             for process, listeners, sid in self._bindings.values():
                 try:
-                    self.validate_binding(process, listeners, sid, latest)
+                    self.validate_binding(process, listeners, sid, latest, processes, endpoints.get(process.pid, set()) if endpoints is not None else None)
                 except ParkingError as error:
                     failures[process.pid] = str(error)
             return failures
@@ -67,6 +72,7 @@ class CodexIdentity:
         for sid in ids: uuid.UUID(sid)
         return set(ids)
 
+    @timed('codex.inventory')
     def inventory(self):
         # Cover newcomers, rather than requiring the entire native service to
         # stay unchanged. A disappeared unrelated worker is not a target race.
@@ -86,13 +92,14 @@ class CodexIdentity:
             ids = latest
         raise Uncertain('Native Codex inventory is still adding uninspected conversations. Observe again.')
 
-    def validate_binding(self, process, listeners, sid, inventory):
+    @timed('codex.binding')
+    def validate_binding(self, process, listeners, sid, inventory, processes=None, endpoints=None):
         matches = [(thread, origin) for thread, origin in inventory.items() if origin in listeners]
         if (sid is None and matches) or (sid is not None and self.owning_thread(matches) != sid):
             raise Uncertain('This Codex terminal changed its owning conversation during inspection.')
-        if self.processes.loopback_listeners(process.pid) != listeners:
+        if (self.processes.loopback_listeners(process.pid) if endpoints is None else endpoints) != listeners:
             raise Uncertain('This Codex terminal changed its endpoint during inspection.')
-        live = self.processes.all().get(process.pid)
+        live = (self.processes.all() if processes is None else processes).get(process.pid)
         if not live or live['started'] != process.started or live['tty'] != process.tty:
             raise Uncertain('Codex process changed during endpoint inspection.')
 
@@ -127,6 +134,7 @@ class CodexIdentity:
                 seen.add(sid); sid = parents[sid]
         return root
 
+    @timed('codex.resolve')
     def resolve(self, process):
         listeners = self.processes.loopback_listeners(process.pid)
         if not listeners:
@@ -144,7 +152,10 @@ class CodexIdentity:
         sid = self.owning_thread(matches)
         if sid is None:
             raise ParkingError('Codex endpoint does not identify exactly one loaded conversation. Nothing guessed or closed.')
-        self.validate_binding(process, listeners, sid, inventory if self._observing else self.inventory())
+        if not self._observing:
+            self.validate_binding(process, listeners, sid, self.inventory())
+        # During an observation all bindings are freshly checked together in
+        # end_observation before any resolved tab is returned to a gate.
         if self._observing:
             self._bindings[process.pid] = (process, listeners, sid)
         return sid

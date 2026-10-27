@@ -66,6 +66,17 @@ class IdentityTests(unittest.TestCase):
         self.rows[self.sid]=('http://127.0.0.1:7000','connected')
         with self.assertRaises(ParkingError):self.identity.resolve(self.pid)
 
+    def test_kernel_endpoint_and_birth_are_rechecked_at_observation_end(self):
+        self.identity.begin_observation()
+        self.identity.resolve(self.pid)
+        self.processes.loopback_listeners.return_value = {'http://127.0.0.1:9000'}
+        self.assertIn(self.pid.pid, self.identity.end_observation())
+        self.processes.loopback_listeners.return_value = {'http://127.0.0.1:5001'}
+        self.identity.begin_observation()
+        self.identity.resolve(self.pid)
+        self.processes.all.return_value[50]['started'] = 'reused birth'
+        self.assertIn(self.pid.pid, self.identity.end_observation())
+
     def test_binding_change_at_observation_end_is_detected(self):
         self.identity.begin_observation();self.identity.resolve(self.pid)
         self.rows[self.other]=self.rows[self.sid]

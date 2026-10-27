@@ -11,6 +11,7 @@ const app={running:()=>true,windows:()=>raw,createWindowWithDefaultProfile:()=>{
 app.windows.byId=id=>raw.find(w=>w.id()===id)||{id:()=>{throw Error("Can't get object. (-1728)")},tabs:()=>{throw Error("Can't get object. (-1728)")}};
 app.windows.id=()=>raw.map(w=>w.id());
 for (const w of [work,test]) {
+  w.tabs().forEach((t,i)=>{ w.tabs[i]=t; t.sessions().forEach((session,j)=>{ t.sessions[j]=session; }); });
   w.tabs.sessions={};
   for (const property of ['id','tty','name']) w.tabs.sessions[property]=()=>w.tabs().map(t=>t.sessions().map(s=>s[property]()));
   w.tabs.title=()=>w.tabs().map(t=>t.title ? t.title() : '');
@@ -22,6 +23,11 @@ const listed=call({action:'list'});
 assert.equal(listed[1].tabs[0].sessions[0].title,'Actual tab title');
 assert.equal(listed[1].tabs[0].sessions[0].receipt,'fixture-token');
 assert.equal(listed[1].tabs[0].sessions[0].name,'Raw session name');
+const lean=call({action:'list',metadata:false});
+assert.equal(lean[1].tabs[0].sessions[0].title,'');
+assert.equal(lean[1].tabs[0].sessions[0].name,'');
+assert.equal(lean[1].tabs[0].sessions[0].receipt,'fixture-token');
+assert.equal(lean[1].tabs[0].sessions[0].id,'test-tab');
 assert.deepEqual(mutations,[]);
 for(const action of ['close','create'])assert.ok(call({action,windowId:'2',sessionIds:['protected'],command:'fixture'}).notSubmitted);
 assert.deepEqual(mutations,[]);

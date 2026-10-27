@@ -25,6 +25,23 @@ struct GarageInteractionTests {
         garage.load() // Reattaching the view cannot reload/replace state.
         precondition(garage.cars.map(\.id) == [a.id,b.id] && garage.windows.isEmpty)
 
+        // A click starts the decoration immediately without claiming recovery.
+        let streaming = Garage()
+        streaming.cars = [b]
+        streaming.beginOpening(b.id)
+        precondition(streaming.departingAt[b.id] != nil && streaming.cars.count == 1)
+        var streamed = b.withStatus("restoring", note: "Opening")
+        streamed.restoredTargets = ["0": .init(windowId: "returned", terminalId: "first", titlePending: nil)]
+        streaming.applyProgress(.init(progress: "1 tab opened", car: streamed, phase: "checking"))
+        precondition(streaming.cars[0].openedTabCount == 1 && streaming.archives.isEmpty)
+        for index in 0..<4 {
+            let saved = PreviewFixtures.car(id: "streamed-\(index)", date: "2026-10-27T12:00:00Z")
+            streaming.applyProgress(.init(progress: "Recovery saved", car: saved.withStatus("saved_open", note: "Saved"), phase: "saved"))
+            streaming.applyProgress(.init(progress: "Window parked", car: saved, phase: "parked"))
+        }
+        precondition(streaming.displayedCars.count == 5)
+        precondition(streaming.arrivingAt["streamed-3"] != nil)
+
         // Legacy recovery journals can record every launch and still say
         // "restoring" when only title readback failed. Do not report missing tabs.
         var pendingTitles = a.withStatus("restoring", note: "Restoring tab 3.")

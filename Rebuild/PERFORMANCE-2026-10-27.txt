@@ -1,0 +1,85 @@
+FREE PARKING 0.5.1 — LATENCY INVESTIGATION
+2026-10-27, build 2026102705
+
+Measured causes
+---------------
+An inventory of 3 windows / 12 tabs took 2.24 seconds and launched 62
+subprocesses. Endpoint validation repeated a complete process inventory for
+each Codex tab, then repeated it again at the end of the same observation.
+Working-folder, open-file and socket reads also launched separate lsof helpers.
+
+On the same desktop, parking the dedicated two-tab Claude/Codex fixture took
+16.30 seconds: 8 observations and 451 subprocesses. Restoring it took 12.68
+seconds: 6 observations and 335 subprocesses. These are measured native tests,
+not the time taken to draw an animation or a fake workflow benchmark.
+
+The UI independently limited a page to two cars. A third saved window was on
+the next page, not missing from recovery. It also waited for the final helper
+response before showing new cars, updating tab counts or animating departure.
+
+Backtrace reads a cached session index and submits a launch command. It does
+not establish the current owner of every live terminal, close a desktop, or
+wait for every reopened conversation to verify. Its fast list and launch UI
+are relevant design examples, but launch submission is not verified recovery.
+Free Parking was doing far too much repeated process work regardless.
+
+Changes
+-------
+Process file/folder/socket data is batched within one read-only observation.
+No cached evidence crosses a mutation boundary. A separate fresh socket and
+process read still verifies endpoint ownership, PID birth, TTY and candidate
+process changes before the snapshot is returned. Normal direct identity checks
+outside an observation retain their original immediate revalidation.
+
+Mutation guards omit display-only name/title/bounds reads. iTerm topology and
+receipts, conversation identity, folders, processes, duplicate checks, durable
+recovery and final order checks remain. Native archive and client-shutdown
+callbacks perform the fresh check immediately before sending instead of also
+repeating the entire check before entering the provider's read-only preflight.
+A failed pre-send check is explicitly NotSubmitted and remains retryable;
+uncertain submitted operations still cannot be replayed.
+
+A refresh now uses one read-only inventory for all recovery records and streams
+existing saved cars before inspecting iTerm. It never uses that shared snapshot
+to authorize a write. A scrolling grid exposes all saved windows (three columns
+at the normal window width). Car departure starts on the opening click; actual
+recovery stays present until verification, and incomplete returns keep the car.
+Per-car progress and opened-tab counts arrive while the helper is still running.
+
+Evidence and limits
+-------------------
+- Batched 12-tab inventory: 0.99 seconds / 11 subprocesses, all 12 identified.
+- Final two-tab native test: 9.23 seconds to park / 5.56 seconds to restore.
+  Counts fell from 451 to 75 subprocesses for parking and 335 to 55 for restore.
+  Exact session identity, order and other working windows were checked.
+- Final release helper, historical seven-tab Backtrace fixture: 14.26 seconds
+  to park / 15.26 seconds to restore. All seven exact sessions and their order
+  verified; the other working windows were unchanged. Streamed counts covered
+  every value from zero through seven, before the final response.
+- 326 backend tests, 171 outer/legacy tests, Swift UI/bridge contracts and JXA
+  boundary tests passed. Tests include fresh endpoint/PID changes, late source
+  reappearance, partial restore retry, early streaming and multiple saved cars.
+- Native SwiftUI export shows all three cars together. Screen capture permission
+  was unavailable; this is an own-view render, not a claim of automated UI clicks.
+
+These are individual measured runs, not timing guarantees or percentile data.
+The seven-tab flow is still a noticeable wait. Remaining costs include repeated
+fresh AppleEvent inventories, CLI startup, graceful process exit, and verification.
+One final two-tab run spent 3.59 seconds waiting for its agent client to exit.
+The earlier functional acceptance should not have implied performance acceptance.
+
+Logs
+----
+Each installed helper operation writes a private timing-*.jsonl file under
+~/Library/Application Support/Free Parking/Diagnostics. Use Garage > Show
+Performance Logs. Traces include nested durations, subprocess categories, native
+RPC methods, observation counts, journal transitions and result/progress timing.
+They omit command arguments, terminal contents, conversation text and titles.
+Logs retain at most 30 files, with an 8 MiB per-operation cap; logging failure
+cannot prevent recovery. Swift helper/progress timings also use the macOS log
+subsystem com.jacobsapps.FreeParking, category performance.
+
+Summarize the latest trace from a checkout with:
+    python3 Rebuild/inspect_timings.py
+Or pass one trace file. Inclusive spans overlap; self time excludes children.
+Raw timing traces and native acceptance artifacts remain private and untracked.

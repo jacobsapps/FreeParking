@@ -1,4 +1,6 @@
 """Real SQLite durability, compare-and-swap revisions and per-window locks."""
+from .diagnostics import timed, event
+
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -168,6 +170,7 @@ class Store:
                       phase=Phase.SAVED.value, targets={}, intent=None, events=[], issue=None)
         return record, self.save(record)
 
+    @timed('store.save')
     def save(self, record):
         candidate = copy.deepcopy(record)
         validate(candidate)
@@ -187,6 +190,7 @@ class Store:
             raise ParkingError('Durable recovery readback failed.')
         record.clear()
         record.update(candidate)
+        event('recovery.saved', phase=record['phase'], tabs=len(record['source']['tabs']), opened=len(record['targets']), intent=(record.get('intent') or {}).get('kind'))
         if self.progress:
             self.progress(record)
         return self.receipt(record)
@@ -195,6 +199,7 @@ class Store:
         body = canonical(record)
         return Receipt(record['id'], record['revision'], hashlib.sha256(body.encode()).hexdigest())
 
+    @timed('store.verify')
     def verify(self, receipt):
         current = self.load(receipt.record_id)
         if self.receipt(current) != receipt:

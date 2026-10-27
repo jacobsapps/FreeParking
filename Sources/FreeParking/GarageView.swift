@@ -3,14 +3,10 @@ import SwiftUI
 struct GarageView: View {
     @EnvironmentObject private var garage: Garage
     var exporting = false
-    @State private var page = 0
     @State private var showingProblem = false
     @State private var showingWindows = false
     @State private var showingSettings = false
-    private let pageSize = 2
     private var hasUnresolvedTabs: Bool { garage.windows.contains { !$0.canPark && !$0.canConfirm } }
-    private var pageCount: Int { max(1, (garage.displayedCars.count + pageSize - 1) / pageSize) }
-    private var visibleCars: [ParkedCar] { Array(garage.displayedCars.dropFirst(min(page, pageCount - 1) * pageSize).prefix(pageSize)) }
 
     var body: some View {
         ZStack {
@@ -25,24 +21,39 @@ struct GarageView: View {
                         Button(hasUnresolvedTabs ? "Review unidentified tabs" : "Review windows") { showingWindows = true }
                             .foregroundStyle(hasUnresolvedTabs ? ParkingStyle.warning : ParkingStyle.secondary)
                     }
-                    if pageCount > 1 {
-                        Button { page = max(0, page - 1) } label: { Image(systemName: "chevron.left") }
-                            .disabled(page == 0)
-                        Text("\(min(page + 1, pageCount)) / \(pageCount)").font(.system(size: 11, design: .monospaced))
-                        Button { page = min(pageCount - 1, page + 1) } label: { Image(systemName: "chevron.right") }
-                            .disabled(page >= pageCount - 1)
-                    }
+
                 }
                 .buttonStyle(.plain)
                 if garage.displayedCars.isEmpty {
                     NewParkingBay(large: true)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    HStack(alignment: .top, spacing: 14) {
-                        NewParkingBay().frame(width: 138)
-                        ForEach(visibleCars) { ParkedBay(car: $0).frame(maxWidth: 220) }
+                    VStack(spacing: 12) {
+                        HStack {
+                            Button("Park my windows") { garage.parkAll() }
+                                .buttonStyle(ParkingButtonStyle(prominent: true))
+                                .disabled(garage.busy)
+                                .accessibilityIdentifier("park-all-windows")
+                            Spacer()
+                            Text("\(garage.cars.count) saved \(garage.cars.count == 1 ? "window" : "windows")")
+                                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+                        }
+                        if exporting {
+                            carGrid(columns: 3)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        } else {
+                            GeometryReader { geometry in
+                                ScrollView {
+                                    carGrid(columns: geometry.size.width >= 580 ? 3 : 2)
+                                        .padding(.vertical, 8)
+                                }
+                                .scrollIndicators(.visible)
+                            }
+                        }
+
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
                 }
                 status
             }
@@ -50,7 +61,6 @@ struct GarageView: View {
         }
         .foregroundStyle(ParkingStyle.ink)
         .task { garage.load() }
-        .onChange(of: garage.displayedCars.count) { _, _ in page = min(page, pageCount - 1) }
         .sheet(isPresented: $garage.showingArchive) { ArchiveView().environmentObject(garage) }
         .sheet(item: $garage.selectedCar) { CarDetails(car: $0).environmentObject(garage) }
         .sheet(item: $garage.recoveryCar) { RecoveryDetails(car: $0).environmentObject(garage) }
@@ -73,6 +83,25 @@ struct GarageView: View {
                     Button("Done") { showingProblem = false }
                 }
             }.padding(22).frame(width: 470)
+        }
+    }
+
+    private func carGrid(columns: Int) -> some View {
+        let cars = garage.displayedCars
+        return Grid(alignment: .top, horizontalSpacing: 14, verticalSpacing: 22) {
+            ForEach(0..<((cars.count + columns - 1) / columns), id: \.self) { row in
+                GridRow(alignment: .top) {
+                    ForEach(0..<columns, id: \.self) { column in
+                        let index = row * columns + column
+                        if index < cars.count {
+                            ParkedBay(car: cars[index]).id(cars[index].id)
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Color.clear.frame(height: 1)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -152,12 +181,12 @@ private struct ParkedBay: View {
                               Color(red: 0.83, green: 0.46, blue: 0.35)]
         return colors[car.id.utf8.reduce(0) { $0 + Int($1) } % colors.count]
     }
-    private var working: Bool { garage.busy && garage.activeCarID == car.id }
+    private var working: Bool { garage.busy && (garage.activeCarID == car.id || car.status == "saved_open") }
 
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Opened, awaiting check" : "")
+                Text(working ? (garage.removingCar ? "Archiving…" : car.status == "saved_open" ? "Parking…" : "Opening…") : car.hasReturned ? "Opened, awaiting check" : "")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(ParkingStyle.secondary)
                 Spacer(minLength: 0)
                 Button { showingActions.toggle() } label: {

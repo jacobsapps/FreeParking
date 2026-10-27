@@ -1,4 +1,6 @@
 """A restartable per-window workflow. No OS calls and no display-dependent logic."""
+from .diagnostics import timed, event
+
 import datetime
 import uuid
 import time
@@ -25,6 +27,7 @@ class Workflow:
         self.store.save(record)
         return record
 
+    @timed('workflow.park')
     def park(self, window_id, expected_fingerprint):
         with self.store.operation(window_id):
             snapshot = self.observer.observe()
@@ -110,6 +113,7 @@ class Workflow:
                 self.note(record, caught)
             return record
 
+    @timed('workflow.confirm_closed')
     def confirm_closed(self, record):
         source = Window.decode(record['source'])
         for index, tab in enumerate(source.tabs):
@@ -183,12 +187,16 @@ class Workflow:
             self.store.transition(record, Phase.RETURNED)
         return record
 
-    def reconcile(self, record_id, read_only=False):
+    @timed('workflow.reconcile')
+    def reconcile(self, record_id, read_only=False, snapshot=None):
+        if snapshot is not None and not read_only:
+            raise ParkingError('Only a read-only refresh may share its inventory.')
         initial = self.store.load(record_id)
         with self.store.operation(initial['source']['window_id']):
             record = self.store.load(record_id)
-            return self.reconcile_record(record, self.observer.observe(), finish_closing=not read_only)
+            return self.reconcile_record(record, snapshot if snapshot is not None else self.observer.observe(), finish_closing=not read_only)
 
+    @timed('workflow.finish_parking')
     def finish_parking(self, record_id):
         """Explicitly finish an already-closed window, never close/reopen a tab."""
         initial = self.store.load(record_id)
@@ -208,6 +216,7 @@ class Workflow:
                 self.note(record, error)
             return record
 
+    @timed('workflow.restore')
     def reopen(self, record_id):
         initial = self.store.load(record_id)
         with self.store.operation(initial['source']['window_id']):

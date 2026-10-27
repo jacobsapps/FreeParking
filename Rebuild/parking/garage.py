@@ -1,4 +1,6 @@
 """Presentation adapter for the original parking UI; all mutations use v2 workflow."""
+from .diagnostics import timed, event
+
 import json
 from pathlib import Path
 import sys
@@ -75,6 +77,7 @@ def car_view(record, root):
         pending_tab=record['intent'].get('index') if record.get('intent') else None)
 
 
+@timed('garage.park_all')
 def park_all(store, observer, workflow, snapshot=None, operations=None, outcomes=None):
     operations = operations or Operations(workflow)
     snapshot=snapshot or observer.observe()
@@ -114,6 +117,7 @@ def park_all(store, observer, workflow, snapshot=None, operations=None, outcomes
     return results
 
 
+@timed('garage.dispatch')
 def dispatch(arguments, root=DEFAULT_ROOT, progress=None):
     args=[a for a in arguments if a != '--progress'];scope=None;live=False
     if args[:1]==['--live']:live=True;args=args[1:]
@@ -135,11 +139,15 @@ def dispatch(arguments, root=DEFAULT_ROOT, progress=None):
             if len(args)==2:reply['settings']=Settings(root).save(json.loads(args[1]))
             else:reply['settings']=Settings(root).read()
         elif action=='scan':
+            # Existing recoveries can appear before native inspection finishes.
+            if progress:
+                for record in store.readable()[0]:
+                    if record['phase'] != 'returned' and not record.get('ui_hidden'): progress(record)
             snapshot=observer.observe();reply['windows']=live_windows(snapshot)
             # Expose every raw window and affected tab even when resolution fails.
             for record in store.readable()[0]:
                 if record['phase']!='returned':
-                    try:workflow.reconcile(record['id'],read_only=True)
+                    try:workflow.reconcile(record['id'],read_only=True,snapshot=snapshot)
                     except Exception as e:reply['warnings'].append(str(e))
             if snapshot.issues:
                 reply['message']='\n'.join(
@@ -225,6 +233,9 @@ def dispatch(arguments, root=DEFAULT_ROOT, progress=None):
 
 
 def main():
+    progress_root = DEFAULT_ROOT
+    if '--test-scope' in sys.argv:
+        progress_root = Path(sys.argv[sys.argv.index('--test-scope') + 1]).resolve().parent/'rebuild-garage'
     def progress(record):
         phase = record['phase']; total = len(record['source']['tabs'])
         index = (record.get('intent') or {}).get('index')
@@ -235,9 +246,14 @@ def main():
         if (record.get('intent') or {}).get('kind') == 'reorder': message = 'Putting all '+str(total)+' tabs back in their saved order'
         if phase in ('saved','interrupting','closing','parked') and record.get('batch_total'):
             message = 'Window '+str(record['batch_index'])+' of '+str(record['batch_total'])+': '+message
-        try: print(json.dumps(dict(progress=message, record_id=record['id'])), flush=True)
+        try: print(json.dumps(dict(progress=message, record_id=record['id'], phase=phase, car=car_view(record, progress_root))), flush=True)
         except BrokenPipeError: pass  # Closing the UI must not interrupt durable recovery.
-    try:reply=dispatch(sys.argv[1:], progress=progress if '--progress' in sys.argv else None)
-    except Exception as e:reply=dict(ok=False,windows=[],cars=[],archives=[],warnings=[],message='',
-                                   error=str(e),error_code=None,verified_archived_ids=[])
-    print(json.dumps(reply))
+    from .diagnostics import Trace
+    action = next((a for a in sys.argv[1:] if a in ('list','scan','park','park-all','park-confirmed','restore','check','finish-parking','settings','remove','unarchive')), 'unknown')
+    with Trace(DEFAULT_ROOT.parent/'Diagnostics', action) as trace:
+        try:reply=dispatch(sys.argv[1:], progress=progress if '--progress' in sys.argv else None)
+        except Exception as e:reply=dict(ok=False,windows=[],cars=[],archives=[],warnings=[],message='',
+                                       error=str(e),error_code=None,verified_archived_ids=[])
+        event('operation.result', ok=reply['ok'], cars=len(reply['cars']), windows=len(reply['windows']), status=reply.get('operation_status'))
+        reply['diagnostics_path'] = str(trace.path) if trace.path else None
+        print(json.dumps(reply))

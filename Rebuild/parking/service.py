@@ -42,7 +42,7 @@ def compose(root=DEFAULT_ROOT, scope_path=None, test_close_response=None, live=F
     store = Store(root)
     providers = Providers(Shell(processes), Claude(processes), Codex(processes, CodexRPC()))
     observer = Observer(terminal, processes, providers)
-    gate = Gate(store, observer, terminal, providers, mutations_enabled=bool(scope_path) or live, settle=observer.observe_until)
+    gate = Gate(store, observer, terminal, providers, mutations_enabled=bool(scope_path) or live, settle=observer.verify_until)
     return store, observer, Workflow(store, observer, gate)
 
 

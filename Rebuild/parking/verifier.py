@@ -1,4 +1,6 @@
 """Read-only observation and outcome verification. No mutation ports here."""
+from .diagnostics import timed, event
+
 import time
 from .model import Observation, ParkingError, Uncertain, Window
 
@@ -7,12 +9,13 @@ class Observer:
     def __init__(self, terminal, processes, providers):
         self.terminal, self.processes, self.providers = terminal, processes, providers
 
-    def observe_until(self, ready, seconds=30):
+    @timed('observer.settle')
+    def observe_until(self, ready, seconds=30, presentation=True):
         """Wait for a newly launched shell to settle, without changing anything."""
         deadline = time.monotonic() + seconds
         while True:
             try:
-                snapshot = self.observe()
+                snapshot = self.observe() if presentation else self.verify()
                 is_ready = ready(snapshot)
             except Uncertain:
                 if time.monotonic() >= deadline: raise
@@ -22,13 +25,24 @@ class Observer:
                 return snapshot
             time.sleep(0.2)
 
-    def observe(self):
+    def verify(self):
+        return self.observe(presentation=False)
+
+    def verify_until(self, ready, seconds=30):
+        return self.observe_until(ready, seconds, presentation=False)
+
+    @timed('observer.scan')
+    def observe(self, presentation=True):
         # Neither a denied permission nor an unreadable process list is 'empty'.
-        raw = self.terminal.windows()
+        lean = getattr(type(self.terminal), 'identity_windows', None)
+        raw = lean(self.terminal) if lean and not presentation else self.terminal.windows()
         processes = self.processes.all()
         windows, issues, tab_issues, resolved, candidates, unresolved = [], {}, {}, {}, {}, {}
-        self.providers.begin_observation()
+        batch = getattr(type(self.processes), 'begin_inspection', None)
+        if batch:
+            batch(self.processes, processes, {s['tty'] for w in raw for t in w['tabs'] for s in t['sessions']})
         try:
+            self.providers.begin_observation()
             for window in raw:
                 for index, raw_tab in enumerate(window['tabs']):
                     for session in raw_tab['sessions']:
@@ -45,7 +59,9 @@ class Observer:
                             tab_issues[session['id']] = str(error)
                             unresolved[session['id']] = tuple(sorted(self.providers.candidates(session, processes)))
         finally:
-            binding_failures = self.providers.end_observation() or {}
+            try: binding_failures = self.providers.end_observation() or {}
+            finally:
+                if batch: self.processes.end_inspection()
         # Prevent a read/process race from being represented as a good binding.
         # Invalidate the affected tab, not unrelated stable windows.
         after = self.processes.all()
@@ -84,6 +100,7 @@ class Observer:
             if not window['tabs']: problems.append('Empty window.')
             if problems: issues[window['id']] = '\n'.join(problems)
             else: windows.append(Window(window['id'], tuple(tabs), window.get('bounds', {})))
+        event('observer.result', windows=len(raw), tabs=sum(len(w['tabs']) for w in raw), resolved=len(resolved), issues=len(issues))
         return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved, candidates, unresolved)
 
 

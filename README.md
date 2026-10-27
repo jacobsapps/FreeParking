@@ -91,6 +91,19 @@ An unfinished legacy launch is reported for review and retained, never replayed
 by guessing. **Garage → Show Previous Recovery Files** opens the originals.
 One unreadable record is reported separately and does not hide intact recoveries.
 
+## Performance diagnostics
+
+Free Parking records private timing traces for every helper operation. Choose
+**Garage → Show Performance Logs**, or run `python3 Rebuild/inspect_timings.py`
+from the checkout to summarize the latest trace. Logs omit command arguments,
+terminal contents and conversation text. They are bounded and stay on your Mac.
+
+The 0.5.1 update batches process inspection, streams cars and tab progress while
+operations run, and shows all saved windows in a scrolling grid. See
+`Rebuild/PERFORMANCE-2026-10-27.txt` for measured before/after results and remaining
+latency; a seven-tab verified restore still takes noticeably longer than merely
+submitting a launch command.
+
 ## Verification
 
 ```sh

@@ -3,6 +3,8 @@
 A separate outer test shim protects the working desktop. This inner gate
 protects lifecycle ordering even when an adapter or coordinator is defective.
 """
+from .diagnostics import timed, event
+
 from .model import ParkingError, NotSubmitted, Phase, Window
 from .verifier import Verifier
 
@@ -11,13 +13,18 @@ class Gate:
     def __init__(self, store, observer, terminal, providers, mutations_enabled=False, settle=None):
         self.store, self.observer, self.terminal, self.providers = store, observer, terminal, providers
         self.mutations_enabled = mutations_enabled
-        self.settle = settle or (lambda ready: self.observer.observe())
+        self.settle = settle or (lambda ready: self.observe())
+
+    def observe(self):
+        verify = getattr(type(self.observer), 'verify', None)
+        return verify(self.observer) if verify else self.observer.observe()
 
     def record(self, receipt):
         if not self.mutations_enabled:
             raise ParkingError('Mutations require an explicit live-app or registered disposable-test capability.')
         return self.store.verify(receipt)
 
+    @timed('gate.interrupt')
     def interrupt(self, receipt):
         def authorize(session_id=None, turn_id=None):
             record = self.record(receipt)
@@ -30,7 +37,7 @@ class Gate:
             tab = source.tabs[intent['index']]
             if session_id is not None and (session_id != tab.session_id or turn_id != tab.turn_id):
                 raise ParkingError('Interruption permit belongs to another conversation/turn.')
-            snapshot = self.observer.observe()
+            snapshot = self.observe()
             if not Verifier.source_open(record, snapshot):
                 raise ParkingError('Window/session changed before interruption. Nothing stopped.')
             if Verifier.other_conversation_tabs(tab, snapshot, {tab.terminal_id}):
@@ -42,49 +49,67 @@ class Gate:
             raise NotSubmitted(str(error)) from error
         return self.providers.get(tab.provider).interrupt(tab, authorize=authorize)
 
+    @timed('gate.stop_client')
     def stop_closed_client(self, receipt):
-        def authorize():
-            record = self.record(receipt);intent = record['intent']
+        def target():
+            record = self.record(receipt); intent = record['intent']
             if record['phase'] != Phase.CLOSING.value or not intent or intent['kind'] != 'stop_client':
                 raise ParkingError('Client shutdown requires a durable close receipt.')
-            source = Window.decode(record['source'])
-            if not Verifier.source_absent(record,self.observer.observe()):
+            return record, Window.decode(record['source'])
+        def authorize():
+            record, source = target()
+            if not Verifier.source_absent(record, self.observe()):
                 raise ParkingError('Never stop a client while its original terminal is still open.')
-            guard = getattr(self.terminal,'authorize_provider',None)
+            guard = getattr(self.terminal, 'authorize_provider', None)
             if guard: guard(source)
-            return source.tabs[intent['index']]
         try:
-            tab = authorize()
+            record, source = target()
+            tab = source.tabs[record['intent']['index']]
         except Exception as error:
             raise NotSubmitted(str(error)) from error
-        self.providers.get(tab.provider).finish_close(tab,authorize)
+        # The provider checks PID birth/folder and calls authorize immediately
+        # before signalling. Do not scan once here and then repeat that scan.
+        self.providers.get(tab.provider).finish_close(tab, authorize)
 
+    @timed('gate.archive')
     def native_archive(self, receipt):
-        def authorize(sid):
+        def target(sid=None):
             record = self.record(receipt)
             intent = record['intent']
             if not intent or intent['kind'] != 'native_archive':
                 raise ParkingError('Native archiving requires a durable per-conversation intent.')
-            source = Window.decode(record['source']);tab = source.tabs[intent['index']]
-            if tab.session_id != sid or tab.provider != 'codex':
+            source = Window.decode(record['source']); tab = source.tabs[intent['index']]
+            if (sid is not None and tab.session_id != sid) or tab.provider != 'codex':
                 raise ParkingError('Native archive permit belongs to another conversation.')
             expected = Phase.CLOSING.value if intent['archived'] else Phase.CHECKING.value
+            if record['phase'] != expected:
+                raise ParkingError('Native archive intent has the wrong recovery phase.')
+            return record, source, tab
+        def check_live(sid):
+            record, source, tab = target(sid)
             snapshot = self.settle(lambda observed: (Verifier.other_conversation_tabs(tab, observed), True)[1])
             if Verifier.other_conversation_tabs(tab, snapshot):
                 raise ParkingError('This conversation is already open elsewhere. Its native runtime was left alone.')
-            if record['phase'] != expected or not Verifier.source_absent(record,snapshot):
+            if not Verifier.source_absent(record, snapshot):
                 raise ParkingError('Original tabs must be closed before changing native archive state.')
             provider_guard = getattr(self.terminal, 'authorize_provider', None)
             if provider_guard: provider_guard(source)
-            return tab, intent['archived']
+        def authorize(sid):
+            try: check_live(sid)
+            except Exception as error:
+                # This callback runs before any native send. A failed fresh
+                # observation must remain retryable, not an ambiguous write.
+                raise NotSubmitted(str(error)) from error
         try:
-            record = self.record(receipt)
-            source = Window.decode(record['source']);tab = source.tabs[record['intent']['index']]
-            tab, archived = authorize(tab.session_id)
+            record, source, tab = target()
         except Exception as error:
             raise NotSubmitted(str(error)) from error
-        return self.providers.get(tab.provider).set_archived(tab, archived, authorize)
+        # Codex performs read-only state/turn checks first, then the RPC invokes
+        # authorize immediately before its send. Every real mutation still has
+        # a fresh full identity check. Already-desired state sends nothing.
+        return self.providers.get(tab.provider).set_archived(tab, record['intent']['archived'], authorize)
 
+    @timed('gate.close')
     def close(self, receipt):
         try:
             source = self.prepare_close(receipt)
@@ -97,7 +122,7 @@ class Gate:
         record = self.record(receipt)
         if record['phase'] != Phase.CLOSING.value or record['intent'] != {'kind': 'close'}:
             raise ParkingError('Closing requires a durable close intent.')
-        snapshot = self.observer.observe()
+        snapshot = self.observe()
         if not Verifier.source_open(record, snapshot):
             raise ParkingError('The window or its processes changed since saving. Nothing closed.')
         source = Window.decode(record['source'])
@@ -115,6 +140,7 @@ class Gate:
                 raise ParkingError('An agent started working before close. Nothing closed; refresh and park again.')
         return source
 
+    @timed('gate.create')
     def create(self, receipt):
         try:
             request = self.prepare_create(receipt)
@@ -126,13 +152,14 @@ class Gate:
         # Exceptions beyond this boundary remain uncertain, never auto-replayed.
         return self.terminal.call('create', **request)
 
+    @timed('gate.reorder')
     def reorder(self, receipt):
         try:
             record = self.record(receipt)
             if record['phase'] != Phase.CHECKING.value or record['intent'] != {'kind':'reorder'}:
                 raise ParkingError('Restoring tab order requires a durable layout intent.')
             source = Window.decode(record['source'])
-            snapshot = self.observer.observe()
+            snapshot = self.observe()
             if not Verifier.source_absent(record, snapshot): raise ParkingError('Original tabs are still present.')
             if set(record['targets']) != {str(i) for i in range(len(source.tabs))}:
                 raise ParkingError('Every saved tab must be open before restoring its order.')

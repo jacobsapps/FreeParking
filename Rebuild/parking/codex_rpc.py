@@ -2,6 +2,8 @@
 
 No server is started, updated or signalled. No remote listener or dependency.
 """
+from .diagnostics import timed, event
+
 from contextlib import contextmanager
 import base64
 import hashlib
@@ -95,7 +97,9 @@ class CodexRPC:
         finally:
             self._session.close();self._session=None
 
+    @timed('codex.rpc')
     def call(self, method, params, mutation=False, authorize=None):
+        event("codex.request", method=method, mutation=mutation)
         try:
             if not self.socket.is_socket():raise ParkingError('The existing local Codex server is not available.')
             transport=self._session or LocalWebSocket(self.socket)
@@ -140,6 +144,7 @@ class CodexRPC:
         finally:
             if self._session is None:transport.close()
 
+    @timed('codex.read')
     def read(self,sid):
         uuid.UUID(sid)
         thread=self.call('thread/read',dict(threadId=sid,includeTurns=False))['thread']

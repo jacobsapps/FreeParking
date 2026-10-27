@@ -32,6 +32,7 @@ struct FreeParkingApp: App {
                     .keyboardShortcut("r")
                     .disabled(garage.busy)
                 Button("Show Recovery Files") { garage.revealGarage() }
+                Button("Show Performance Logs") { garage.revealDiagnostics() }
                 Button("Show Previous Recovery Files") { garage.revealPreviousRecovery() }
             }
         }

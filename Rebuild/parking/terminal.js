@@ -18,16 +18,20 @@ function run(argv) {
         return s.name();
     }
     function inventory(w) {
+        const metadata = request.metadata !== false;
         const ids = layout(w);
         const ttys = w.tabs.sessions.tty();
-        const names = w.tabs.sessions.name();
+        const names = metadata ? w.tabs.sessions.name() : ids.map(group => group.map(() => ''));
         let titles;
-        try { titles = w.tabs.title(); } catch (_) { titles = []; }
+        try { titles = metadata ? w.tabs.title() : []; } catch (_) { titles = []; }
         let bounds = {};
-        try { bounds = w.bounds(); } catch (_) {}
-        return {id:String(w.id()), bounds:bounds, tabs:w.tabs().map((t,i) => ({
-            sessions:t.sessions().map((s,j) => ({id:ids[i][j], tty:ttys[i][j],
-                title:titles[i] || names[i][j], name:variable(s,'autoName'), receipt:variable(s,'user.freeParkingReceipt')}))
+        try { if (metadata) bounds = w.bounds(); } catch (_) {}
+        return {id:String(w.id()), bounds:bounds, tabs:ids.map((group,i) => ({
+            sessions:group.map((sid,j) => {
+                const s = w.tabs[i].sessions[j];
+                return {id:sid, tty:ttys[i][j], title:titles[i] || names[i][j],
+                    name:metadata ? variable(s,'autoName') : '', receipt:variable(s,'user.freeParkingReceipt')};
+            })
         }))};
     }
     function exact() {
@@ -43,8 +47,9 @@ function run(argv) {
         return w;
     }
     if (request.action === 'list') {
-        const before = windows().map(w => ({id:String(w.id()), tabs:layout(w).map(ids => ({sessions:ids.map(id => ({id}))}))}));
-        const raw = windows().map(inventory);
+        const original = windows();
+        const before = original.map(w => ({id:String(w.id()), tabs:layout(w).map(ids => ({sessions:ids.map(id => ({id}))}))}));
+        const raw = original.map(inventory);
         const after = windows().map(w => ({id:String(w.id()), tabs:layout(w).map(ids => ({sessions:ids.map(id => ({id}))}))}));
         const expected = JSON.stringify(topology(raw));
         if (JSON.stringify(topology(before)) !== expected || JSON.stringify(topology(after)) !== expected) {

@@ -1,4 +1,6 @@
 """Local OS boundaries. Constructors and imports never inspect or mutate iTerm."""
+from .diagnostics import timed, event
+
 from pathlib import Path
 import json
 import os
@@ -7,10 +9,12 @@ import time
 from .model import ParkingError, Uncertain, NotSubmitted
 
 
-def run(argv, timeout=15):
+@timed('subprocess')
+def run(argv, timeout=15, allow_no_matches=False):
+    event('subprocess.request', executable=Path(argv[0]).name)
     result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                             env={**os.environ, 'LC_ALL': 'C'})
-    if result.returncode:
+    if result.returncode and not (allow_no_matches and result.returncode == 1 and not result.stderr.strip()):
         raise ParkingError(result.stderr.strip() or 'Local helper failed with exit ' + str(result.returncode))
     return result.stdout
 
@@ -20,9 +24,11 @@ class ITerm:
         self.runner = runner
         self.script = Path(script) if script else Path(__file__).with_name('terminal.js')
 
+    @timed('terminal.call')
     def call(self, action, **kwargs):
         if action not in ('list', 'close', 'create', 'reorder'):
             raise ParkingError('Unknown terminal adapter operation.')
+        event('terminal.request', action=action)
         request = json.dumps(dict(action=action, **kwargs))
         try:
             argv = (['/usr/bin/python3', str(self.script.with_name('layout_api.py')), request] if action == 'reorder'
@@ -46,12 +52,13 @@ class ITerm:
             raise Uncertain(result['uncertain'])
         return result
 
-    def windows(self):
+    @timed('terminal.inventory')
+    def windows(self, metadata=True):
         # AppleEvents expose individual properties, not an atomic desktop.
         # Retry only these reads, from scratch. A create/close is never replayed.
         for attempt in range(4):
             try:
-                return self.call('list')
+                return self.call('list', metadata=metadata)
             except ParkingError as error:
                 transient = '-1728' in str(error) or 'FP_READ_RACE' in str(error)
                 if not transient:
@@ -60,11 +67,66 @@ class ITerm:
                     raise Uncertain('iTerm’s layout is still changing. No complete window inventory could be read; nothing was assumed closed. '+str(error)) from error
                 time.sleep(0.1 * (attempt + 1))
 
+    def identity_windows(self):
+        return self.windows(metadata=False)
+
 
 class Processes:
     def __init__(self, runner=run):
         self.runner = runner
+        self._inspection = None
 
+    @staticmethod
+    def parse_files(output, pids):
+        """lsof field output, grouped by PID and file (never by display names)."""
+        import re
+        result = {pid: dict(files=[], cwd=[], listeners=set()) for pid in pids}
+        pid = None
+        entry = {}
+        def finish():
+            if pid is None or not entry: return
+            row = result[pid]
+            name = entry.get('n')
+            if name is not None:
+                row['files'].append(name)
+                if entry.get('f') == 'cwd': row['cwd'].append(name)
+                if entry.get('TST') == 'LISTEN' and re.fullmatch(r'127\.0\.0\.1:[0-9]+', name):
+                    row['listeners'].add('http://' + name)
+        for line in output.splitlines():
+            if not line: continue
+            if line[0] == 'p':
+                finish(); entry = {}
+                pid = int(line[1:])
+                if pid not in result: raise ParkingError('Unexpected process in file inventory.')
+            elif line[0] == 'f':
+                finish(); entry = {'f': line[1:]}
+            elif line.startswith('TST='): entry['TST'] = line[4:]
+            elif line[0] in ('n', 't'): entry[line[0]] = line[1:]
+        finish()
+        return result
+
+    @timed('process.batch_files')
+    def begin_inspection(self, processes, ttys):
+        # Only lifetime of one read-only Observer call; never reused across
+        # mutation boundaries. A second endpoint/process read closes the scan.
+        pids = [pid for pid,p in processes.items() if p['tty'] in ttys and
+                (Path(p['executable']).name.lstrip('-') in ('zsh','codex','claude','caffeinate')
+                 or '/claude/' in p['executable'])]
+        output = self.runner(['/usr/sbin/lsof', '-nP', '-a', '-p', ','.join(map(str,pids)), '-FpnftT'],
+                             allow_no_matches=True) if pids else ''
+        self._inspection = self.parse_files(output, pids)
+
+    def end_inspection(self):
+        self._inspection = None
+
+    @timed('process.batch_listeners')
+    def fresh_listeners(self, pids):
+        output = self.runner(['/usr/sbin/lsof', '-nP', '-a', '-p', ','.join(map(str,pids)),
+                              '-iTCP', '-sTCP:LISTEN', '-FpnftT'], allow_no_matches=True) if pids else ''
+        return {pid: row['listeners'] for pid,row in self.parse_files(output, pids).items()}
+
+
+    @timed('process.inventory')
     def all(self):
         result = {}
         for line in self.runner(['/bin/ps', '-axo', 'pid=,ppid=,tty=,lstart=,comm=']).splitlines():
@@ -78,17 +140,26 @@ class Processes:
             raise ParkingError('Empty process inventory; inspection is unavailable.')
         return result
 
+    @timed('process.cwd')
     def cwd(self, pid):
+        if self._inspection is not None:
+            names = self._inspection.get(pid, {}).get('cwd', [])
+            if len(names) != 1: raise ParkingError('Cannot identify this process working directory.')
+            return names[0]
         lines = self.runner(['/usr/sbin/lsof', '-a', '-p', str(pid), '-d', 'cwd', '-Fn']).splitlines()
         names = [line[1:] for line in lines if line.startswith('n')]
         if len(names) != 1:
             raise ParkingError('Cannot identify this process working directory.')
         return names[0]
 
+    @timed('process.files')
     def files(self, pid):
+        if self._inspection is not None: return self._inspection.get(pid, {}).get('files', [])
         return [line[1:] for line in self.runner(['/usr/sbin/lsof', '-a', '-p', str(pid), '-Fn']).splitlines() if line.startswith('n')]
 
+    @timed('process.listeners')
     def loopback_listeners(self, pid):
+        if self._inspection is not None: return self._inspection.get(pid, {}).get('listeners', set())
         output = self.runner(['/usr/sbin/lsof', '-nP', '-a', '-p', str(pid),
                               '-iTCP', '-sTCP:LISTEN', '-Fn'])
         import re
@@ -106,12 +177,15 @@ class Processes:
             raise ParkingError('Cannot verify this helper’s executable path.')
         return buffer.value.decode()
 
+    @timed('process.command')
     def command(self, pid):
         return self.runner(['/bin/ps', '-p', str(pid), '-o', 'args=']).strip()
 
+    @timed('process.birth')
     def started_utc(self, pid):
         return ' '.join(self.runner(['/usr/bin/env', 'TZ=UTC', '/bin/ps', '-p', str(pid), '-o', 'lstart=']).split())
 
+    @timed('process.signal')
     def send_signal(self, saved, number):
         try:
             import signal

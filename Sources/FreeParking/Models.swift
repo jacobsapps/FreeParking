@@ -2,6 +2,7 @@ import AppKit
 import Carbon
 import Foundation
 import SwiftUI
+import os
 
 struct AgentTab: Decodable, Identifiable, Sendable {
     let index: Int
@@ -189,7 +190,7 @@ enum LocalBackend {
         #endif
     }
 
-    static func call(_ arguments: [String], progress: (@Sendable (String) -> Void)? = nil) throws -> BackendResponse {
+    static func call(_ arguments: [String], progress: (@Sendable (BackendProgress) -> Void)? = nil) throws -> BackendResponse {
         guard !PreviewMode.enabled else {
             throw BackendError("Terminal access is disabled in the UI preview.")
         }
@@ -207,6 +208,9 @@ enum LocalBackend {
             }
             if status != noErr { throw BackendError("Could not request iTerm Automation access (\(status)). No terminal action was taken.") }
         }
+        let started = Date()
+        performanceLog.info("helper.begin action=\(arguments.first ?? "list", privacy: .public)")
+        defer { performanceLog.info("helper.end seconds=\(Date().timeIntervalSince(started), privacy: .public)") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         let scopeArguments = testScope.map { ["--test-scope", $0] } ?? ["--live"]
@@ -233,8 +237,12 @@ enum LocalBackend {
             while let newline = buffer.firstIndex(of: 10) {
                 let line = Data(buffer[..<newline])
                 buffer.removeSubrange(...newline)
-                if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                   let text = object["progress"] as? String { progress?(text) }
+                let decoder = JSONDecoder()
+                decoder.keyDecodingStrategy = .convertFromSnakeCase
+                if let update = try? decoder.decode(BackendProgress.self, from: line) {
+                    performanceLog.info("helper.progress seconds=\(Date().timeIntervalSince(started), privacy: .public)")
+                    progress?(update)
+                }
                 else if !line.isEmpty { data = line }
             }
         }
@@ -250,6 +258,14 @@ enum LocalBackend {
         catch { throw BackendError("Could not read the helper's response. Recovery files have not been removed. \(error.localizedDescription)") }
     }
 }
+
+struct BackendProgress: Decodable, Sendable {
+    let progress: String
+    var car: ParkedCar? = nil
+    var phase: String? = nil
+}
+
+private let performanceLog = Logger(subsystem: "com.jacobsapps.FreeParking", category: "performance")
 
 struct BackendError: LocalizedError {
     let message: String
@@ -275,6 +291,7 @@ final class Garage: ObservableObject {
     let isPreview = PreviewMode.enabled
     private var loadedOnce = false
     private var activeOperation: String?
+    private var operationToken: UUID?
     var mustFinishBeforeQuitting: Bool { QuitPolicy.mustWait(operation: activeOperation, busy: busy) }
     @Published var cars: [ParkedCar] = []
     @Published var archives: [ParkedCar] = []
@@ -308,7 +325,7 @@ final class Garage: ObservableObject {
 
     func issue(for car: ParkedCar) -> CarIssue? {
         if let issue = carIssues[car.id] { return issue }
-        guard car.needsAttention, activeCarID != car.id else { return nil }
+        guard car.needsAttention, activeCarID != car.id, !(busy && car.status == "saved_open") else { return nil }
         let parkingIncomplete = car.status == "saved_open" ||
             ((car.restoredTargets?.isEmpty ?? true) && car.pendingTab == nil && car.status != "restoring")
         return CarIssue(summary: parkingIncomplete ? "Parking incomplete" : "Opening incomplete",
@@ -432,19 +449,36 @@ final class Garage: ObservableObject {
         message = ""
     }
 
+    func beginOpening(_ id: String) {
+        departingAt[id] = .now
+    }
+
+    func applyProgress(_ update: BackendProgress) {
+        activity = update.progress
+        guard let car = update.car else { return }
+        if ["saved", "interrupting", "closing", "parked"].contains(update.phase ?? "") { activeCarID = car.id }
+        let wasParked = cars.first(where: { $0.id == car.id })?.status == "parked"
+        if let index = cars.firstIndex(where: { $0.id == car.id }) { cars[index] = car }
+        else if car.returnVerified != true { cars.insert(car, at: 0) }
+        if update.phase == "parked" && !wasParked { arrivingAt[car.id] = .now }
+        performanceLog.info("ui.progress cars=\(self.cars.count, privacy: .public) opened=\(car.openedTabCount, privacy: .public)")
+    }
+
     private func depart(_ cars: [ParkedCar]) {
-        guard !cars.isEmpty else { return }
-        let started = Date()
         for car in cars {
+            let started = departingAt[car.id] ?? Date()
+            let remaining = max(0, 1.8 - Date().timeIntervalSince(started))
             departingCars.removeAll { $0.id == car.id }
+            guard remaining > 0 else { departingAt[car.id] = nil; arrivingAt[car.id] = nil; continue }
             departingCars.append(car)
             departingAt[car.id] = started
-        }
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(1800))
-            let ids = Set(cars.map(\.id).filter { departingAt[$0] == started })
-            departingCars.removeAll { ids.contains($0.id) }
-            for id in ids { departingAt[id] = nil; arrivingAt[id] = nil }
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(remaining))
+                guard departingAt[car.id] == started else { return }
+                departingCars.removeAll { $0.id == car.id }
+                departingAt[car.id] = nil
+                arrivingAt[car.id] = nil
+            }
         }
     }
 
@@ -472,6 +506,8 @@ final class Garage: ObservableObject {
 
     private func perform(_ arguments: [String], activity: String, carID: String? = nil) {
         guard !busy else { return }
+        let token = UUID()
+        operationToken = token
         activeOperation = arguments.first
         busy = true
         activeCarID = carID
@@ -480,14 +516,20 @@ final class Garage: ObservableObject {
         operationStartedAt = .now
         problem = nil
         message = ""
-        if let carID { carIssues[carID] = nil }
+        if let carID {
+            carIssues[carID] = nil
+            if arguments.first == "restore" { beginOpening(carID) }
+        }
         Task {
             var failure: String?
             do {
                 let response = try await Task.detached(priority: .userInitiated) {
                     try OperationCompletion.call(arguments) { args in
-                        try LocalBackend.call(args) { text in
-                            Task { @MainActor in self.activity = text }
+                        try LocalBackend.call(args) { update in
+                            Task { @MainActor in
+                                guard self.busy, self.operationToken == token else { return }
+                                self.applyProgress(update)
+                            }
                         }
                     }
                 }.value
@@ -540,8 +582,13 @@ final class Garage: ObservableObject {
                 } else if problem == nil { problem = failure }
                 else if problem != failure { problem = [problem!, failure].joined(separator: "\n") }
             }
+            if let carID, cars.contains(where: { $0.id == carID }) {
+                departingAt[carID] = nil
+                if arguments.first == "restore" { arrivingAt[carID] = .now }
+            }
             busy = false
             activeOperation = nil
+            operationToken = nil
             activeCarID = nil
             removingCar = false
             self.activity = ""
@@ -559,6 +606,13 @@ final class Garage: ObservableObject {
         NSPasteboard.general.setString(car.commands, forType: .string)
         message = "Resume commands copied. Each command is for one tab."
     }
+    func revealDiagnostics() {
+        guard !isPreview else { return }
+        let folder = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/Free Parking/Diagnostics")
+        NSWorkspace.shared.open(folder)
+    }
+
     func revealGarage() {
         guard !isPreview else { message = "Preview mode does not read or write your recovery files."; return }
         let url = FileManager.default.homeDirectoryForCurrentUser
@@ -589,7 +643,7 @@ final class Garage: ObservableObject {
         case "parked", "details", "options":
             cars = [sample]
         case "multiple":
-            cars = [sample, PreviewFixtures.cars[1]]
+            cars = PreviewFixtures.cars
         case "archive":
             archives = PreviewFixtures.cars.map { $0.withStatus("archived", note: "Verified return. Recovery retained.") }
             showingArchive = true

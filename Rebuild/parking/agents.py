@@ -1,4 +1,6 @@
 """Exact agent identity and resume specifications, independent of tab titles."""
+from .diagnostics import timed, event, span
+
 import base64
 import json
 from pathlib import Path
@@ -9,6 +11,7 @@ from .model import ParkingError, Process, Tab, Uncertain, NotSubmitted
 from .permissions import launch_flags, CLAUDE_MODES
 
 
+@timed('agent.executable')
 def preflight_executable(executable):
     from .adapters import run
     # The same login-shell PATH used by the actual new terminal command.
@@ -45,6 +48,7 @@ def client_closed(tab, processes):
     return not live or live['started'] != tab.process.started
 
 
+@timed('agent.finish_close')
 def finish_client_close(tab, processes, authorize):
     import signal
     try:
@@ -57,11 +61,12 @@ def finish_client_close(tab, processes, authorize):
         raise NotSubmitted(str(error)) from error
     processes.send_signal(dict(pid=tab.process.pid,started=tab.process.started,tty=tab.tty),
                           signal.SIGINT if tab.provider == 'claude' else signal.SIGTERM)
-    deadline=time.monotonic()+45
-    while time.monotonic()<deadline:
-        if client_closed(tab,processes):return
-        time.sleep(.2)
-    raise Uncertain('The closed terminal client has not exited. No force-kill or automatic replay.')
+    with span('agent.wait_for_exit', provider=tab.provider):
+        deadline=time.monotonic()+45
+        while time.monotonic()<deadline:
+            if client_closed(tab,processes):return
+            time.sleep(.2)
+        raise Uncertain('The closed terminal client has not exited. No force-kill or automatic replay.')
 
 
 class Claude:
@@ -97,6 +102,7 @@ class Claude:
                 if entry.get('sessionId') == sid and entry.get('cwd') == cwd: return paths[0]
         raise ParkingError('Claude transcript does not confirm this conversation and folder.')
 
+    @timed('agent.identify')
     def identify(self, session, processes):
         _, process = exact_process(session, processes, self.name)
         record = self.registry(process)
@@ -111,6 +117,7 @@ class Claude:
 
     def finish_close(self, tab, authorize): finish_client_close(tab, self.processes, authorize)
 
+    @timed('agent.launch')
     def launch(self, tab, receipt, prompt=None):
         if tab.provider != self.name: raise ParkingError('Provider changed.')
         self.saved(tab.session_id,tab.cwd)
@@ -235,6 +242,7 @@ class Claude:
             and outcome.get('session_id') == tab.session_id and outcome.get('request_id')
             and self.continuation_request(tab) == outcome['request_id'])
 
+    @timed('agent.interrupt')
     def interrupt(self, tab, authorize=None):
         import signal
         try:
@@ -287,6 +295,7 @@ class Codex:
 
     def end_observation(self): return self.identity.end_observation()
 
+    @timed('agent.identify')
     def identify(self, session, processes):
         _, process=exact_process(session,processes,self.name)
         # Exact open-rollout identity is available on embedded-server Codex.
@@ -348,6 +357,7 @@ class Codex:
             raise ParkingError('Codex native archive identity/folder disagrees.')
         return bool(row[0])
 
+    @timed('codex.archive')
     def set_archived(self, tab, archived, authorize):
         try:
             if self.is_archived(tab) == archived: return
@@ -365,6 +375,7 @@ class Codex:
 
     def finish_close(self, tab, authorize): finish_client_close(tab, self.processes, authorize)
 
+    @timed('agent.launch')
     def launch(self, tab, receipt, prompt=None):
         thread=self.rpc.read(tab.session_id)
         if tab.provider!=self.name or thread['id']!=tab.session_id or thread['cwd']!=tab.cwd:
@@ -373,6 +384,7 @@ class Codex:
 
     def preflight(self, tab): preflight_executable(self.executable)
 
+    @timed('agent.interrupt')
     def interrupt(self,tab,authorize=None):
         try:
             thread=self.rpc.read(tab.session_id)
