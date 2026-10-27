@@ -226,3 +226,17 @@ not establish who created those tabs or whether they existed at the original
 failure. Do not adopt or close them. Current state is not historical causality.
 No terminal was created, closed, interrupted, typed into or retitled by this
 observation. The raw inventory is private and remains only on the original Mac.
+
+Measured read-only scan cost, 2026-10-27
+--------------------------------------
+One cProfile run of the current Observer against the existing two-window,
+six-tab desktop resolved both windows with no issues in approximately 3.0 seconds.
+It performed 45 subprocess calls, including 14 complete process inventories and 18
+loopback-listener queries. Subprocess work consumed approximately 2.9 seconds.
+Raw iTerm enumeration alone took approximately 0.45 seconds. This is measured
+read-only evidence of expensive repeated process inspection, not a measurement
+of the earlier parking operation or proof of a particular optimization's safety.
+Hot paths: CodexIdentity.validate_binding (12 calls), Processes.all (14 calls),
+and Processes.loopback_listeners (18 calls). Inspect repeated validation within
+one observation before introducing cross-operation caches. Preserve process-birth,
+TTY, executable and endpoint ownership checks at mutation boundaries.
