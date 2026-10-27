@@ -18,7 +18,7 @@ struct GarageView: View {
             VStack(spacing: 10) {
                 header
                 HStack {
-                    Text(garage.hasScanned ? "iTerm · \(garage.windows.count) \(garage.windows.count == 1 ? "window" : "windows") · \(garage.windows.reduce(0) { $0 + $1.tabs.count }) tabs" : "")
+                    Text(garage.hasScanned ? "iTerm, \(garage.windows.count) \(garage.windows.count == 1 ? "window" : "windows"), \(garage.windows.reduce(0) { $0 + $1.tabs.count }) tabs" : "")
                         .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
                     Spacer()
                     if !garage.windows.isEmpty {
@@ -154,7 +154,7 @@ private struct ParkedBay: View {
     var body: some View {
         VStack(spacing: 6) {
             HStack {
-                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Opened · awaiting check" : "")
+                Text(working ? (garage.removingCar ? "Archiving…" : "Opening…") : car.hasReturned ? "Opened, awaiting check" : "")
                     .font(.system(size: 11, weight: .medium)).foregroundStyle(ParkingStyle.secondary)
                 Spacer(minLength: 0)
                 Button { showingActions.toggle() } label: {
@@ -181,13 +181,13 @@ private struct ParkedBay: View {
                 TimelineView(.periodic(from: .now, by: 60)) { context in
                     RegistrationPlate(text: CarDateLabel.title(for: car.date, now: context.date))
                 }
-                Text("\(car.tabs.count) tabs · \(car.date.formatted(.dateTime.hour().minute()))")
+                Text("\(car.tabs.count) tabs, \(car.date.formatted(.dateTime.hour().minute()))")
                     .font(.system(size: 11, design: .monospaced)).foregroundStyle(ParkingStyle.secondary)
             }
             .contentShape(Rectangle())
             .onTapGesture(count: 1) { garage.open(car) }
             .onHover { value in withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { hovered = value } }
-            .help(car.tabNamesHelp + "\n\nClick to reopen this window in iTerm.")
+            .help(car.tabNamesHelp + (car.canFinishParking ? "\n\nClick to finish parking without reopening any tabs." : car.isChecking ? "\n\nClick to check this saved window’s status without repeating commands." : "\n\nClick to reopen this window in iTerm."))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(car.date.formatted()), \(car.tabs.count) tabs, \(car.statusLabel)")
             .accessibilityAddTraits(.isButton)
@@ -199,6 +199,20 @@ private struct ParkedBay: View {
 
             Text(car.displayTitle).font(.system(size: 11, weight: .medium))
                 .lineLimit(1).help(car.tabNamesHelp)
+            if car.canFinishParking, !working {
+                Button("Finish parking") { garage.open(car) }
+                    .buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
+                    .help("The window has closed. Complete its saved-session preparation without reopening any tabs.")
+            }
+            if car.isChecking, !working {
+                Button { garage.open(car) } label: {
+                    Label("Check confirmation status", systemImage: "clock")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.plain).foregroundStyle(ParkingStyle.secondary)
+                .help(car.note.isEmpty ? "Recovery is saved. Checking never repeats an unconfirmed command." : car.note)
+                .disabled(garage.busy)
+            }
             if car.hasReturned {
                 Button("Check again") { garage.open(car) }
                     .accessibilityIdentifier("check-car-" + car.id)
@@ -222,7 +236,7 @@ private struct ParkedBay: View {
             }
         }
         .contextMenu {
-            Button("Open in iTerm") { garage.open(car) }.disabled(garage.busy)
+            Button(car.canFinishParking ? "Finish parking" : car.isChecking ? "Check status" : "Open in iTerm") { garage.open(car) }.disabled(garage.busy)
             Button("Show tabs") { garage.selectedCar = car }
             Button("Recovery…") { garage.recoveryCar = car }
             Divider()
@@ -334,7 +348,7 @@ struct ArchiveView: View {
                 HStack(spacing: 14) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(car.displayTitle).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                        Text("\(car.date.formatted(date: .abbreviated, time: .shortened)) · \(car.tabs.count) tabs")
+                        Text("\(car.date.formatted(date: .abbreviated, time: .shortened)), \(car.tabs.count) tabs")
                             .font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
                     }
                     Spacer(minLength: 8)
@@ -369,7 +383,7 @@ private struct ArchiveButton: View {
                     }
                 }
         }
-        .buttonStyle(.plain).help("Archived cars · recovery kept")
+        .buttonStyle(.plain).help("Archived cars, recovery kept")
         .accessibilityLabel("Archived cars")
         .accessibilityValue(garage.archiveAcknowledged ? "Car archived" : "")
         .accessibilityIdentifier("show-archive")
@@ -466,7 +480,7 @@ struct ResumeConfirmationView: View {
         VStack(alignment: .leading, spacing: 16) {
             ForEach(confirmation.entries) { entry in
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Window \(entry.windowNumber), tab \(entry.tabNumber) · \(entry.title)").font(.system(size: 13, weight: .semibold))
+                    Text("Window \(entry.windowNumber), tab \(entry.tabNumber), \(entry.title)").font(.system(size: 13, weight: .semibold))
                     Text(entry.name).font(.system(size: 13))
                     Text(entry.cwd).font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
                     Text(entry.sessionId).font(.system(size: 10, design: .monospaced)).foregroundStyle(ParkingStyle.secondary).textSelection(.enabled)

@@ -8,6 +8,7 @@ accident just because it is visible or frontmost.
 from pathlib import Path
 import uuid
 from .model import ParkingError
+from .operations import Operations
 from .providers import Shell
 from .testing import FixtureTerminal, fixture_tab
 
@@ -17,7 +18,7 @@ class Lab:
         self.scope, self.terminal, self.composer = scope, terminal, composer
         self.seeder = seeder
 
-    def create(self, tabs=1, provider='shell', busy=False):
+    def create(self, tabs=1, provider='shell', busy=False, settle_each=True):
         if type(tabs) is not int or not 1 <= tabs <= 8:
             raise ParkingError('Use one to eight tabs per disposable window.')
         if provider not in ('shell','claude','codex','mixed') or (provider != 'shell' and self.seeder is None):
@@ -67,11 +68,30 @@ class Lab:
             fixture['window_id'] = created['windowId']
             fixture['session_ids'].append(created['sessionId'])
             self.scope.save()
-            if agents:
+            if agents and settle_each:
                 _, observer, _ = self.composer()
                 snapshot = observer.observe_until(lambda o: o.window(fixture['window_id']) is not None)
                 if not snapshot.window(fixture['window_id']):
                     raise ParkingError(snapshot.issues.get(fixture['window_id'],'New agent identity is unconfirmed.'))
+        if not settle_each:
+            # Test setup only: raw creates still each pass the protective gate
+            # and persist their receipt. Batch identity settling saves repeated
+            # full inventories, never weakens the criterion for an open fixture.
+            def matches(observed):
+                window = observed.window(fixture['window_id'])
+                if not window or [t.terminal_id for t in window.tabs] != fixture['session_ids']:
+                    return False
+                for i, tab in enumerate(window.tabs):
+                    if tab.cwd != folders[i]: return False
+                    if agents:
+                        if (tab.provider, tab.session_id) != (agents[i]['provider'], agents[i]['session_id']): return False
+                    elif tab.provider != 'shell': return False
+                return True
+            _, observer, _ = self.composer()
+            snapshot = observer.observe_until(matches)
+            if not matches(snapshot):
+                raise ParkingError('New fixture identities do not match its exact saved conversations, folders and create receipts. No parking attempted.')
+            self.scope.audit(self.terminal.terminal.windows())
         fixture['state'] = 'open'
         self.scope.save()
         return dict(fixture)
@@ -109,7 +129,7 @@ class Lab:
             fixture['state'] = 'open'
             self.scope.save()
         elif fixture.get('record_id'):
-            record = workflow.reconcile(fixture['record_id'])
+            record = Operations(workflow, seconds=5).check(fixture['record_id']).record
             self._reload();fixture = self.scope.data['fixtures'][fixture['id']]
             if record['phase'] == 'returned':
                 targets = [record['targets'].get(str(i)) for i in range(len(fixture['folders']))]
@@ -139,7 +159,7 @@ class Lab:
         self.scope.save()
         store, observer, workflow = self.composer()
         window = wait(lambda: observer.observe().window(window_id))
-        record = workflow.park(window_id, window.fingerprint)
+        record = Operations(workflow).park(window_id, window.fingerprint).record
         self._reload()  # Independent helper composition can update ownership.
         fixture = self.scope.data['fixtures'][fixture['id']]
         fixture['record_id'] = record['id']
@@ -151,11 +171,10 @@ class Lab:
         fixture['state'] = 'opening'
         self.scope.save()
         _, _, workflow = self.composer()
-        record = workflow.reopen(record['id'])
-        def returned():
-            result = workflow.reconcile(record['id'])
-            return result if result['phase'] == 'returned' else None
-        record = wait(returned)
+        outcome = Operations(workflow).reopen(record['id'])
+        record = outcome.record
+        if outcome.status != 'completed':
+            raise ParkingError(outcome.detail or 'The production operation did not complete. No test-only reconciliation was performed.')
         self._reload()
         fixture = self.scope.data['fixtures'][fixture['id']]
         targets = [record['targets'][str(i)] for i in range(len(fixture['folders']))]

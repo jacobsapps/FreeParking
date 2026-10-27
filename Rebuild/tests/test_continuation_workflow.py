@@ -129,7 +129,7 @@ class MixedClosureTests(unittest.TestCase):
                 authorize(tab.session_id,tab.turn_id)
                 owner.events.append('codex-interrupted')
                 live=owner.desktop.live[1]
-                owner.desktop.live[1]=Window('fixture',(live.tabs[0],replace(live.tabs[1],activity='idle')))
+                owner.desktop.live[1]=Window('fixture',(live.tabs[0],replace(live.tabs[1],activity='idle'))+live.tabs[2:])
                 return dict(provider='codex',session_id=tab.session_id,outcome='interrupted',turn_id=tab.turn_id)
             def launch(self,tab,receipt,prompt=None):return command(tab,receipt,['codex','resume',tab.session_id],prompt)
         self.providers.items.update(claude=Claude(),codex=Codex())
@@ -138,7 +138,7 @@ class MixedClosureTests(unittest.TestCase):
 
     def test_mixed_running_window_is_saved_closed_once_and_both_agents_continue(self):
         record=self.park();self.assertEqual(record['phase'],'parked')
-        self.assertEqual(self.events,['codex-interrupted','claude-close-authorized','claude-close-confirmed'])
+        self.assertEqual(self.events,['codex-interrupted','claude-close-confirmed'])
         record=self.flow.reopen(record['id']);self.assertEqual(record['phase'],'returned')
         self.assertEqual(record['interruptions']['0']['outcome'],'interrupted')
         self.assertEqual(record['interruptions']['1']['outcome'],'interrupted')
@@ -162,11 +162,46 @@ class MixedClosureTests(unittest.TestCase):
         record=self.flow.reconcile(record['id']);self.assertEqual(record['phase'],'parked')
         self.assertEqual([a for a,_ in self.desktop.calls],['close'])
 
-    def test_changed_claude_request_rejects_close(self):
+    def test_changed_claude_request_does_not_block_session_close(self):
         def changed(*args):raise ParkingError('different active request')
         self.providers.items['claude'].validate_close_interruption=changed
-        record=self.park();self.assertEqual(record['phase'],'saved')
-        self.assertEqual(self.desktop.calls,[])
+        record=self.park();self.assertEqual(record['phase'],'parked')
+        self.assertEqual([action for action,_ in self.desktop.calls],['close'])
+
+    def test_idle_claude_new_request_does_not_block_session_close(self):
+        codex = self.providers.items['codex']; original = codex.interrupt
+        def interrupt(*args, **kwargs):
+            outcome = original(*args, **kwargs)
+            live = self.desktop.live[1]
+            self.desktop.live[1] = Window('fixture', (replace(live.tabs[0], activity='idle'), live.tabs[1]))
+            return outcome
+        codex.interrupt = interrupt
+        def changed(*args): raise ParkingError('different completed request')
+        self.providers.items['claude'].validate_close_interruption = changed
+        record = self.park()
+        self.assertEqual(record['phase'], 'parked')
+        self.assertEqual([action for action,_ in self.desktop.calls], ['close'])
+
+    def test_late_optional_preparation_failure_keeps_session_and_prior_interruption(self):
+        first = self.desktop.source.tabs[0]
+        third = replace(first, terminal_id='third-tab', session_id=str(uuid.uuid4()))
+        self.desktop.source = Window('fixture', self.desktop.source.tabs+(third,))
+        self.desktop.live[1] = self.desktop.source
+        claude = self.providers.items['claude']; prepare = claude.prepare_close_interruption
+        def failed(tab):
+            if tab.terminal_id == 'third-tab': raise ParkingError('request not persisted')
+            return prepare(tab)
+        claude.prepare_close_interruption = failed
+        record = self.park()
+        self.assertEqual(record['phase'], 'parked'); self.assertIsNone(record['intent'])
+        self.assertIsNone(record['issue'])
+        self.assertEqual(record['interruptions']['1']['turn_id'], 'turn-exact')
+        self.assertNotIn('2', record['interruptions'])
+        self.assertEqual(self.events.count('codex-interrupted'), 1)
+        self.assertEqual([action for action, _ in self.desktop.calls], ['close'])
+        record = self.flow.reopen(record['id'])
+        self.assertEqual(record['phase'], 'returned')
+        self.assertEqual(self.prompts, [['please continue'], []])
 
 class NativeArchiveTests(MixedClosureTests):
     def setUp(self):
@@ -201,3 +236,19 @@ class NativeArchiveTests(MixedClosureTests):
         provider.set_archived=lost
         record=self.park();self.assertEqual(record['phase'],'closing')
         record=self.flow.reconcile(record['id']);self.assertEqual(record['phase'],'parked');self.assertEqual(calls,[True])
+
+    def test_archive_preflight_failure_after_close_can_reconcile_without_reclosing(self):
+        from parking.model import NotSubmitted
+        provider = self.providers.items['codex']
+        original = provider.set_archived
+        def unavailable(*args): raise NotSubmitted('Archive preflight unavailable')
+        provider.set_archived = unavailable
+        record = self.park()
+        self.assertEqual(record['phase'], 'closing')
+        self.assertEqual(record['intent'], {'kind': 'close'})
+        self.assertIn('Archive preflight unavailable', record['issue'])
+        provider.set_archived = original
+        record = self.flow.reconcile(record['id'])
+        self.assertEqual(record['phase'], 'parked')
+        self.assertEqual([a for a, _ in self.desktop.calls], ['close'])
+        self.assertEqual(self.desktop.live[0], self.desktop.work)

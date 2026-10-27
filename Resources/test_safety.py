@@ -46,6 +46,8 @@ class Scope:
         self.journal_failed = False
         self.data = json.loads(self.path.read_text())
         d = self.data
+        if type(d.get('allow_protected_additions', False)) is not bool:
+            raise SafetyError('Protected additions policy must be a boolean.')
         if (d.get('schema_version') != 2 or not isinstance(d.get('protected_windows'), list)
                 or not isinstance(d.get('protected_processes'), list) or not d['protected_processes']
                 or not isinstance(d.get('owned'), dict) or not isinstance(d.get('launch_commands'), list)
@@ -60,8 +62,10 @@ class Scope:
                 raise SafetyError('Test ownership overlaps protected windows or is invalid.')
 
     @classmethod
-    def capture(cls, path, terminal, processes, commands):
+    def capture(cls, path, terminal, processes, commands, allow_protected_additions=False):
         path = Path(path)
+        if type(allow_protected_additions) is not bool:
+            raise SafetyError('Protected additions policy must be a boolean.')
         if path.exists():
             raise SafetyError('Never overwrite a test baseline; use a new scope directory.')
         # Process inspection MUST succeed before any fixture is launched.
@@ -71,6 +75,7 @@ class Scope:
         baseline_windows = terminal.windows()
         write_private(path, dict(schema_version=2, protected_windows=baseline_windows,
                                 protected_processes=list(baseline_processes.values()),
+                                allow_protected_additions=allow_protected_additions,
                                 owned={}, owned_processes=[], launch_commands=commands, pending_create=None))
         return cls(path)
 
@@ -101,9 +106,26 @@ class Scope:
 
     def audit(self, raw):
         """Read-only presence check. Never restores/mutates a changed work window."""
-        current = {w['id']: session_ids(w) for w in raw}
-        changed = [w['id'] for w in self.data['protected_windows']
-                   if current.get(w['id']) != session_ids(w)]
+        current = {w['id']: w for w in raw}
+        if self.data.get('allow_protected_additions', False):
+            # This changes only the preservation audit, never mutation ownership.
+            # Original tab groups must remain intact, in their original window
+            # and relative order. Added panes within an original tab are not
+            # added tabs. Duplicate IDs cannot masquerade as preserved originals.
+            all_ids = [sid for w in raw for sid in session_ids(w)]
+            if len(current) != len(raw) or len(all_ids) != len(set(all_ids)):
+                raise SafetyError('Duplicate terminal identities. Test stopped.')
+            def preserved(original):
+                live = current.get(original['id'])
+                if live is None: return False
+                groups = [tuple(s['id'] for s in t['sessions']) for t in original['tabs']]
+                original_ids = {sid for group in groups for sid in group}
+                live_groups = [tuple(s['id'] for s in t['sessions']) for t in live['tabs']]
+                return [group for group in live_groups if original_ids.intersection(group)] == groups
+            changed = [w['id'] for w in self.data['protected_windows'] if not preserved(w)]
+        else:
+            changed = [w['id'] for w in self.data['protected_windows']
+                       if w['id'] not in current or session_ids(current[w['id']]) != session_ids(w)]
         if changed:
             raise SafetyError('Protected window identities/order changed. Stop and inspect; do not repair automatically.')
         self.owned_windows(raw)

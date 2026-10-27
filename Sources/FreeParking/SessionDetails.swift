@@ -12,7 +12,7 @@ struct CarDetails: View {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Saved tabs").font(.system(size: 20, weight: .semibold))
-                    Text("\(car.tabs.count) tabs · \(car.date.formatted(date: .abbreviated, time: .shortened))")
+                    Text("\(car.tabs.count) tabs, \(car.date.formatted(date: .abbreviated, time: .shortened))")
                         .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
                 }
                 Spacer()
@@ -109,7 +109,7 @@ private struct SessionList: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(tab.displayTitle).font(.system(size: 13, weight: .medium))
                         if tab.issue.isEmpty {
-                            Text("\(tab.label) · \(tab.shortPath)")
+                            Text("\(tab.label), \(tab.shortPath)")
                                 .font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
                         } else {
                             if !tab.cwd.isEmpty {

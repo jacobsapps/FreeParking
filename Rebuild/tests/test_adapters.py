@@ -92,6 +92,7 @@ class BoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder,patch('parking.service.compose') as composer:
             store,observer,flow=Mock(),Mock(),Mock()
             store.root=Path(folder);store.all.return_value=[]
+            flow.park.return_value={'id':'owned-record','phase':'parked'}
             composer.return_value=store,observer,flow
             result=dispatch(['--live','park','chosen-window','captured-fingerprint'],root=Path(folder))
             self.assertTrue(result['ok']);self.assertTrue(result['can_mutate'])
@@ -104,7 +105,11 @@ class BoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             terminal=Mock();terminal.windows.return_value=[dict(id='w',tabs=[dict(sessions=[dict(id='t',tty='/dev/test',title='test')])])]
             p=Mock();p.cwd.return_value=folder;p.all.side_effect=[{1:dict(pid=1,ppid=0,tty='/dev/test',started='one',executable='/bin/zsh')},{}]
-            with self.assertRaises(Uncertain):Observer(terminal,p,Providers(Shell(p))).observe()
+            snapshot=Observer(terminal,p,Providers(Shell(p))).observe()
+            self.assertIsNone(snapshot.window('w'))
+            self.assertNotIn('t',snapshot.resolved_tabs)
+            self.assertIn('changed',snapshot.tab_issues['t'])
+            self.assertIn('codex',snapshot.unresolved_providers['t'])
 
     def test_plain_keep_awake_tab_preserves_the_exact_helper(self):
         with tempfile.TemporaryDirectory() as folder:

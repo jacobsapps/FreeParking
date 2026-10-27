@@ -5,7 +5,7 @@ from pathlib import Path
 import shlex
 import time
 import uuid
-from .model import ParkingError, Process, Tab, Uncertain
+from .model import ParkingError, Process, Tab, Uncertain, NotSubmitted
 
 
 def command(tab, receipt, argv, prompt=None):
@@ -38,11 +38,14 @@ def client_closed(tab, processes):
 
 def finish_client_close(tab, processes, authorize):
     import signal
-    live = processes.all().get(tab.process.pid)
-    if not live or live['started'] != tab.process.started: return
-    if live['tty'] != tab.tty or live['executable'] != tab.process.executable or processes.cwd(tab.process.pid) != tab.cwd:
-        raise ParkingError('Closed terminal process changed identity. No signal sent.')
-    authorize()
+    try:
+        live = processes.all().get(tab.process.pid)
+        if not live or live['started'] != tab.process.started: return
+        if live['tty'] != tab.tty or live['executable'] != tab.process.executable or processes.cwd(tab.process.pid) != tab.cwd:
+            raise ParkingError('Closed terminal process changed identity. No signal sent.')
+        authorize()
+    except Exception as error:
+        raise NotSubmitted(str(error)) from error
     processes.send_signal(dict(pid=tab.process.pid,started=tab.process.started,tty=tab.tty),
                           signal.SIGINT if tab.provider == 'claude' else signal.SIGTERM)
     deadline=time.monotonic()+45
@@ -118,61 +121,114 @@ class Claude:
                     return entry.get('uuid')
         return None
 
-    def pending_request(self, tab, path):
-        """Native persisted request not followed by a final assistant response."""
-        pending = None
+    def request_state(self, tab, path):
+        """Latest persisted user request, retaining identity after natural completion.
+
+        Claude writes thinking and text as separate assistant rows. A thinking
+        row can carry end_turn while the response is still being produced.
+        """
+        request_id, completed = None, False
         with path.open() as stream:
             for line in stream:
                 try: entry = json.loads(line)
-                except ValueError: continue
+                except ValueError as error:
+                    raise ParkingError('Claude request history is incomplete. Nothing closed.') from error
+                if not isinstance(entry, dict):
+                    raise ParkingError('Claude request history is unreadable. Nothing closed.')
                 if entry.get('sessionId') != tab.session_id or entry.get('isSidechain'): continue
                 message = entry.get('message', {})
+                if not isinstance(message, dict):
+                    raise ParkingError('Claude request history is unreadable. Nothing closed.')
                 content = message.get('content', [])
-                # Tool results are not new user requests.
-                user_text = isinstance(content, str) or any(
-                    isinstance(c, dict) and c.get('type') == 'text' for c in content)
-                if entry.get('type') == 'user' and user_text:
-                    pending = entry.get('uuid')
-                elif entry.get('type') == 'assistant' and message.get('stop_reason') in (
-                        'end_turn', 'stop_sequence', 'max_tokens', 'refusal'):
-                    pending = None
-        return pending
+                if not isinstance(content, (str, list)):
+                    raise ParkingError('Claude request history is unreadable. Nothing closed.')
+                text = bool(content.strip()) if isinstance(content, str) else any(
+                    isinstance(c, dict) and c.get('type') == 'text'
+                    and isinstance(c.get('text'), str) and c['text'].strip() for c in content)
+                if entry.get('type') == 'user':
+                    # Image/document-only requests are new work too; only pure
+                    # tool-result messages belong to the existing user request.
+                    if isinstance(content, list):
+                        kinds = [c.get('type') if isinstance(c, dict) else None for c in content]
+                        if not kinds or any(k not in ('text', 'image', 'document', 'tool_result') for k in kinds):
+                            raise ParkingError('Claude user request is unreadable. Nothing closed.')
+                        if all(k == 'tool_result' for k in kinds): continue
+                        user_request = text or any(k in ('image', 'document') for k in kinds)
+                    else: user_request = text
+                    if not user_request:
+                        raise ParkingError('Claude user request is empty. Nothing closed.')
+                    request_id, completed = entry.get('uuid'), False
+                    if not isinstance(request_id, str) or not request_id:
+                        raise ParkingError('Claude request identity is unavailable. Nothing closed.')
+                elif entry.get('type') == 'assistant' and request_id:
+                    reason = message.get('stop_reason')
+                    if reason in ('stop_sequence', 'max_tokens', 'refusal') or (reason == 'end_turn' and text):
+                        completed = True
+        return dict(request_id=request_id, completed=completed)
+
+    def pending_request(self, tab, path):
+        state = self.request_state(tab, path)
+        return None if state['completed'] else state['request_id']
+
+    def continuation_request(self, tab):
+        """Best-effort evidence for the OPTIONAL follow-up message, not identity.
+
+        Identity and resumability are checked by identify()/launch() separately.
+        A missing, partial or unfamiliar request record grants no auto-send credit;
+        it must never block parking an otherwise verified exact conversation.
+        """
+        try:
+            state = self.request_state(tab, self.saved(tab.session_id, tab.cwd))
+            request_id = state['request_id']
+            if state['completed'] or not request_id: return None
+            uuid.UUID(request_id)
+            return request_id
+        except (ParkingError, OSError, ValueError, TypeError, KeyError):
+            return None
 
     def prepare_close_interruption(self, tab):
-        path = self.saved(tab.session_id, tab.cwd)
-        request_id = self.pending_request(tab, path)
-        if not request_id:
-            raise ParkingError('Claude has not persisted its active request. Nothing closed.')
+        request_id = self.continuation_request(tab)
+        if request_id is None: return None
         return dict(provider=self.name, session_id=tab.session_id, request_id=request_id,
                     method='terminal-close')
 
     def validate_close_interruption(self, tab, checkpoint):
-        if (checkpoint.get('session_id') != tab.session_id or checkpoint.get('provider') != self.name
-                or checkpoint.get('method') != 'terminal-close'):
-            raise ParkingError('Claude close checkpoint belongs to another conversation.')
-        pending = self.pending_request(tab, self.saved(tab.session_id, tab.cwd))
-        if pending != checkpoint['request_id']:
-            raise ParkingError('Claude started a different request. Refresh before closing.')
+        """Whether continuation evidence is still valid; never a close permit."""
+        return bool(isinstance(checkpoint, dict)
+                    and checkpoint.get('session_id') == tab.session_id
+                    and checkpoint.get('provider') == self.name
+                    and checkpoint.get('method') == 'terminal-close'
+                    and checkpoint.get('request_id')
+                    and self.continuation_request(tab) == checkpoint['request_id'])
 
     def confirm_close_interruption(self, tab, checkpoint):
+        # Process shutdown is core lifecycle evidence. Keep inspection failures
+        # and a still-live captured process OUTSIDE the optional-metadata catch.
         current = self.processes.all().get(tab.process.pid)
         if current and current['started'] == tab.process.started:
             raise Uncertain('Claude is still shutting down. Recovery is saved; check again.')
-        pending = self.pending_request(tab, self.saved(tab.session_id, tab.cwd))
-        if pending is not None and pending != checkpoint['request_id']:
-            raise Uncertain('Claude’s request changed during close. No continuation was authorized.')
+        interrupted = self.validate_close_interruption(tab, checkpoint)
         return dict(provider=self.name, session_id=tab.session_id,
-                    request_id=checkpoint['request_id'], confirmation='terminal_closed_process_exited',
-                    outcome='interrupted' if pending else 'not_interrupted')
+                    request_id=checkpoint.get('request_id') if isinstance(checkpoint, dict) else None,
+                    confirmation='terminal_closed_process_exited',
+                    outcome='interrupted' if interrupted else 'unconfirmed')
+
+    def interruption_current(self, tab, outcome):
+        return bool(outcome and outcome.get('provider') == self.name
+            and outcome.get('session_id') == tab.session_id and outcome.get('request_id')
+            and self.continuation_request(tab) == outcome['request_id'])
 
     def interrupt(self, tab, authorize=None):
         import signal
-        if self.activity(tab) != 'running': return dict(outcome='not_interrupted',session_id=tab.session_id,provider=self.name)
-        path = self.saved(tab.session_id,tab.cwd)
-        offset = path.stat().st_size
-        request_id = self.pending_request(tab, path)
-        if authorize is None: raise ParkingError('A durable interruption permit is required.')
-        authorize()
+        try:
+            if self.activity(tab) != 'running': return dict(outcome='not_interrupted',session_id=tab.session_id,provider=self.name)
+            path = self.saved(tab.session_id,tab.cwd)
+            offset = path.stat().st_size
+            request_id = self.pending_request(tab, path)
+            if authorize is None: raise ParkingError('A durable interruption permit is required.')
+            authorize()
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         self.processes.send_signal(dict(pid=tab.process.pid,started=tab.process.started,tty=tab.tty),signal.SIGINT)
         deadline = time.monotonic()+20
         while time.monotonic() < deadline:
@@ -212,7 +268,7 @@ class Codex:
 
     def begin_observation(self): self.identity.begin_observation()
 
-    def end_observation(self): self.identity.end_observation()
+    def end_observation(self): return self.identity.end_observation()
 
     def identify(self, session, processes):
         _, process=exact_process(session,processes,self.name)
@@ -265,8 +321,9 @@ class Codex:
 
     def is_archived(self, tab):
         import sqlite3
+        from contextlib import closing
         try:
-            with sqlite3.connect((self.root/'state_5.sqlite').as_uri()+'?mode=ro', uri=True) as db:
+            with closing(sqlite3.connect((self.root/'state_5.sqlite').as_uri()+'?mode=ro', uri=True)) as db:
                 row = db.execute('SELECT archived,cwd FROM threads WHERE id=?',(tab.session_id,)).fetchone()
         except sqlite3.Error as error:
             raise ParkingError('Cannot confirm Codex native archive state.') from error
@@ -275,10 +332,13 @@ class Codex:
         return bool(row[0])
 
     def set_archived(self, tab, archived, authorize):
-        if self.is_archived(tab) == archived: return
-        thread = self.rpc.read(tab.session_id)
-        if thread['id'] != tab.session_id or thread['cwd'] != tab.cwd or self.active_turn(thread):
-            raise ParkingError('Only this saved, stopped Codex conversation may change archive state.')
+        try:
+            if self.is_archived(tab) == archived: return
+            thread = self.rpc.read(tab.session_id)
+            if thread['id'] != tab.session_id or thread['cwd'] != tab.cwd or self.active_turn(thread):
+                raise ParkingError('Only this saved, stopped Codex conversation may change archive state.')
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         self.rpc.call('thread/archive' if archived else 'thread/unarchive', dict(threadId=tab.session_id),
                       mutation=True, authorize=lambda sid, turn: authorize(sid))
         if self.is_archived(tab) != archived:
@@ -295,10 +355,13 @@ class Codex:
         return command(tab,receipt,[self.executable,'resume',tab.session_id],prompt)
 
     def interrupt(self,tab,authorize=None):
-        thread=self.rpc.read(tab.session_id)
-        turn=self.active_turn(thread)
-        if not turn:return dict(outcome='not_interrupted',session_id=tab.session_id,provider=self.name)
-        if turn!=tab.turn_id:raise ParkingError('Codex started a different turn. Refresh before parking.')
+        try:
+            thread=self.rpc.read(tab.session_id)
+            turn=self.active_turn(thread)
+            if not turn:return dict(outcome='not_interrupted',session_id=tab.session_id,provider=self.name)
+            if turn!=tab.turn_id:raise ParkingError('Codex started a different turn. Refresh before parking.')
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         self.rpc.interrupt(tab.session_id,turn,authorize=authorize)
         deadline=time.monotonic()+20
         while time.monotonic()<deadline:
@@ -310,3 +373,36 @@ class Codex:
                 return dict(outcome='not_interrupted',session_id=tab.session_id,provider=self.name,turn_id=turn)
             time.sleep(.2)
         raise Uncertain('Codex interruption is not confirmed. The shared server was not signalled.')
+
+    def observe_interruption(self, tab):
+        """Recover a lost interrupt acknowledgement without sending anything."""
+        thread = self.rpc.read(tab.session_id)
+        if thread.get('id') != tab.session_id or thread.get('cwd') != tab.cwd:
+            raise Uncertain('Saved interruption conversation or folder changed.')
+        turn = next((t for t in thread.get('turns', []) if t['id'] == tab.turn_id), None)
+        if not turn:
+            # Latest turn can have advanced after a lost acknowledgement. A
+            # bounded exact-ID history read can recover the fact, not authorize
+            # continuation of old work (interruption_current checks latest only).
+            history = self.rpc.call('thread/turns/list', dict(threadId=tab.session_id,
+                limit=100, sortDirection='desc', itemsView='notLoaded'))
+            turns = history.get('data')
+            if not isinstance(turns, list): raise Uncertain('Unreadable saved interruption history.')
+            matches = [t for t in turns if isinstance(t, dict) and t.get('id') == tab.turn_id]
+            if len(matches) > 1: raise Uncertain('Ambiguous saved interruption history.')
+            turn = matches[0] if matches else None
+        if not turn or turn.get('status') == 'inProgress': return None
+        if turn['status'] not in ('interrupted', 'completed', 'failed'): return None
+        return dict(outcome='interrupted' if turn['status'] == 'interrupted' else 'not_interrupted',
+                    session_id=tab.session_id, provider=self.name, turn_id=tab.turn_id)
+
+    def interruption_current(self, tab, outcome):
+        if (outcome.get('provider') != self.name or outcome.get('session_id') != tab.session_id
+                or not outcome.get('turn_id')): return False
+        thread = self.rpc.read(tab.session_id)
+        # CodexRPC.read explicitly requests only the latest persisted turn.
+        # Do not search history: a later completed request revokes old credit.
+        turns = thread.get('turns', [])
+        return (thread.get('id') == tab.session_id and thread.get('cwd') == tab.cwd
+                and len(turns) == 1 and turns[0]['id'] == outcome['turn_id']
+                and turns[0]['status'] == 'interrupted')

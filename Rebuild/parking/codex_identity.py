@@ -27,6 +27,7 @@ class CodexIdentity:
         self.processes, self.rpc = processes, rpc
         self._observing = False
         self._snapshot = None
+        self._bindings = {}
 
     def origin(self, sid):
         result = self.rpc.call('mcpServerStatus/list', dict(
@@ -41,26 +42,59 @@ class CodexIdentity:
     def begin_observation(self):
         self._observing = True
         self._snapshot = None
+        self._bindings = {}
 
     def end_observation(self):
         try:
-            if self._snapshot is not None and self._snapshot != self.inventory():
-                raise Uncertain('Codex endpoint bindings changed during observation.')
+            if not self._bindings: return {}
+            latest = self.inventory()
+            failures = {}
+            for process, listeners, sid in self._bindings.values():
+                try:
+                    self.validate_binding(process, listeners, sid, latest)
+                except ParkingError as error:
+                    failures[process.pid] = str(error)
+            return failures
         finally:
             self._observing = False
             self._snapshot = None
+            self._bindings = {}
 
-    def inventory(self):
+    def loaded(self):
         ids = self.rpc.call('thread/loaded/list', {})['data']
         if len(ids) > 512 or len(ids) != len(set(ids)):
             raise Uncertain('Invalid or oversized native Codex thread inventory.')
+        for sid in ids: uuid.UUID(sid)
+        return set(ids)
+
+    def inventory(self):
+        # Cover newcomers, rather than requiring the entire native service to
+        # stay unchanged. A disappeared unrelated worker is not a target race.
+        ids = self.loaded()
         result = {}
-        for sid in ids:
-            uuid.UUID(sid)
-            result[sid] = self.origin(sid)
-        if set(self.rpc.call('thread/loaded/list', {})['data']) != set(ids):
-            raise Uncertain('Codex changed its loaded conversations during inspection.')
-        return result
+        for _ in range(4):
+            for sid in sorted(ids - result.keys()):
+                try:
+                    result[sid] = self.origin(sid)
+                except ParkingError:
+                    # Suppress a failed read only when native inventory proves
+                    # that particular thread disappeared, never on a guess.
+                    if sid in self.loaded(): raise
+            latest = self.loaded()
+            result = {sid: origin for sid, origin in result.items() if sid in latest}
+            if latest <= result.keys(): return result
+            ids = latest
+        raise Uncertain('Native Codex inventory is still adding uninspected conversations. Observe again.')
+
+    def validate_binding(self, process, listeners, sid, inventory):
+        matches = [(thread, origin) for thread, origin in inventory.items() if origin in listeners]
+        if (sid is None and matches) or (sid is not None and self.owning_thread(matches) != sid):
+            raise Uncertain('This Codex terminal changed its owning conversation during inspection.')
+        if self.processes.loopback_listeners(process.pid) != listeners:
+            raise Uncertain('This Codex terminal changed its endpoint during inspection.')
+        live = self.processes.all().get(process.pid)
+        if not live or live['started'] != process.started or live['tty'] != process.tty:
+            raise Uncertain('Codex process changed during endpoint inspection.')
 
     def owning_thread(self, matches):
         """Collapse only explicit native subagent relationships, never titles/forks."""
@@ -101,14 +135,16 @@ class CodexIdentity:
         if self._observing: self._snapshot = inventory
         matches = [(sid, origin) for sid, origin in inventory.items() if origin in listeners]
         if not matches:
+            if self._observing:
+                # A user-confirmed warm resume may use its exact CLI binding
+                # after MissingEndpoint. A newly linked native owner must still
+                # invalidate that fallback before this observation is used.
+                self._bindings[process.pid] = (process, listeners, None)
             raise MissingEndpoint("Codex has not linked this terminal to its loaded conversation. No window was changed.")
         sid = self.owning_thread(matches)
         if sid is None:
             raise ParkingError('Codex endpoint does not identify exactly one loaded conversation. Nothing guessed or closed.')
-        if ((not self._observing and self.inventory() != inventory)
-                or self.processes.loopback_listeners(process.pid) != listeners):
-            raise Uncertain('Codex changed conversations or endpoint during inspection.')
-        live = self.processes.all().get(process.pid)
-        if not live or live['started'] != process.started or live['tty'] != process.tty:
-            raise Uncertain('Codex process changed during endpoint inspection.')
+        self.validate_binding(process, listeners, sid, inventory if self._observing else self.inventory())
+        if self._observing:
+            self._bindings[process.pid] = (process, listeners, sid)
         return sid

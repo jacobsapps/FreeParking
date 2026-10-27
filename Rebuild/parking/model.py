@@ -12,7 +12,7 @@ class ParkingError(RuntimeError):
 
 
 class NotSubmitted(ParkingError):
-    """Rejected before any terminal mutation was submitted; a retry is safe."""
+    """Rejected before any mutation was submitted; a retry is safe."""
 
 
 class Uncertain(ParkingError):
@@ -133,6 +133,7 @@ class Observation:
     tab_issues: dict = field(default_factory=dict)
     resolved_tabs: dict = field(default_factory=dict)
     confirmation_candidates: dict = field(default_factory=dict)
+    unresolved_providers: dict = field(default_factory=dict)
 
     @property
     def terminal_ids(self):

@@ -238,3 +238,113 @@ with Park my windows and ordinary Review windows. Activation smoke checks observ
 these are not claimed as completed hide/refocus cycles. 155 backend tests
 and Swift UI-model/bridge checks pass. Existing recovery hashes unchanged; no
 terminal actions were performed.
+
+Lifecycle contract repair — 2026-10-15 (earlier checkpoint)
+---------------------------------------------------
+The previous five-tab reopen incident lost the original exception, so its first
+trigger is not established. Do not infer an OS or CLI regression from the card.
+Confirmed defects addressed in this repair:
+- Pre-submission refusal is distinct from unknown submitted outcomes. A refusal
+  can be retried without duplicating already returned tabs; an unknown mutation
+  is observed, never blindly replayed. Original errors remain in journal events.
+- Native Codex inventory churn invalidates only affected identities. Resolved
+  conversations remain in duplicate guards even in otherwise unsupported windows.
+  New/changed agent candidates on the target TTY invalidate that observation;
+  ordinary agent tool children and unrelated windows do not.
+- Production UI and live harness share bounded operation completion. Check status
+  is read-only; it does not replay restore or finish an unrequested close. A late
+  confirmed close offers explicit Finish parking. Pending is not called failure.
+- Claude close checkpoints retain exact user-request identity after natural
+  completion. A request finishing while earlier tabs are prepared no longer
+  masquerades as an unpersisted request. New requests, incomplete history and
+  unknown payloads still refuse closure. Thinking-only rows are not final text.
+- Continuation requires the exact interrupted request to remain current, including
+  immediately before launch. Lost Codex interruption acknowledgements can be
+  reconciled by exact turn ID without sending another interrupt.
+
+Evidence at this checkpoint:
+- 246 rebuild tests pass, including failure after tab three, retry after app
+  restart, unknown acknowledgements, unrelated inventory churn, same-TTY process
+  changes, natural completion and stale continuation credit. Native Swift bridge
+  and model checks, offline JXA checks and 155 outer tests also pass.
+- One real five-tab mixed Claude/Codex window completed parking and reopening via
+  a built production helper. A slow client shutdown was observed without a second
+  stop request. This run preceded the final observation/Claude completion fixes.
+- A four-window, twenty-tab mixed workload exposed the Claude natural-completion
+  defect before any close. Two owned Codex turns had already been interrupted;
+  their receipts were retained. The native transcript/registry proves the Claude
+  request completed during sequential preparation, not that persistence was lost.
+- The repaired retry stopped before mutation because all four disposable windows
+  had disappeared. Their disappearance was not attributed to this app. The
+  protected working window retained its exact seven-tab baseline. Original
+  failed reports and protective scopes were not rewritten.
+- Final source compiles/signs as 0.4.3; it has NOT passed a fresh full live cycle,
+  been installed, or been published at this checkpoint. The existing installation
+  and its uncertain recovery record remain unchanged. Native archive provider
+  details still appear in the coordinator; a full provider-schema rewrite is
+  deliberately not claimed. No exhaustive crash/cross-version guarantee is made.
+
+Repeatable production-helper acceptance uses Rebuild/prove_garage.py with a fresh
+private directory and protective baseline. Its test-only confirmation controller
+may approve only an exact owned iTerm close sheet. The optional scoped installed-
+app AX driver verifies the installed bundle/PID/argv/baseline before one exact
+control press; it is not bundled and has not yet been used for this acceptance.
+
+
+Session-first repair — 2026-10-15 (verification in progress)
+---------------------------------------------------------
+This section supersedes the earlier checkpoint's continuation semantics and
+installation status. Exact saved conversation identity and directory authorize
+session recovery. Optional unfinished-request evidence does not authorize it:
+- Missing, unfamiliar, partial, completed or changed Claude request metadata
+  omits automatic continuation rather than blocking parking or reopening.
+- Invalid optional continuation settings disable automatic text for the operation;
+  the settings file is retained and exact-session restoration still proceeds.
+- Continuation is checked again immediately before launch. A failed optional
+  check omits the message, not the session. The message is never retried alone.
+- Durable saves, exact terminal/process/session identity, client shutdown, Codex
+  shared-server interruption and native archive confirmation remain required.
+- A final close guard also rejects a newly appeared competing conversation using
+  its fresh snapshot. This additional guard is offline-verified, not deployed.
+- Read-only Codex archive-state queries now close their SQLite connection on both
+  success and failure. Seventeen temporary-database tests cover real SQL shape,
+  readback, invalid/missing data and pre-submission versus submitted failures.
+  This resource fix is not claimed as the original incident cause.
+
+The current source passes 290 rebuild tests and 171 outer tests, plus native
+Swift model/bridge and offline JXA checks. These are component/contract evidence,
+not installed-app end-to-end proof.
+A simulated four-window, twenty-tab production-dispatch regression also proves
+all records are durable before the first mutation, optional later-window request
+failures do not halt the batch, exact session/folder/order preservation, and no
+duplicate launches or continuation messages after helper reload. Its native
+boundaries are fakes; it does not replace the outstanding live workload.
+
+Concrete live evidence before that final guard:
+- A two-tab mixed Claude/Codex window passed production-helper parking and
+  reopening with both agents working. Both exact sessions returned and each
+  transcript contained exactly one automatic continuation message.
+- A five-tab mixed idle window passed the production-helper round trip. All five
+  exact sessions returned and no continuation message was sent.
+- The original protected working window's identities/order survived these tests.
+  New protective scopes can explicitly allow extra user-created top-level tabs;
+  they still reject missing/moved/reordered originals or added split panes.
+- Version 0.4.3, build 2026101503 was installed. Bundle helper hashes matched the
+  five-tab acceptance build and installation preserved production recovery data.
+- The installed UI's initial scan was blocked by macOS Documents consent. Consent
+  was subsequently allowed and read-only AX inspection confirmed the scan ended.
+  No installed-UI park/reopen action was executed. Helper proof is NOT UI proof.
+- A larger four-window setup did not reach parking. A read-only iTerm enumeration
+  timed out while the Mac was locked; that is not a completed round-trip result.
+- At Jacob's request, all three remaining receipt-owned test windows were closed
+  using original receipts. The cleanup audit confirmed his work window unchanged.
+  Failed acceptance reports and historical baselines remain intact, not reset.
+
+Outstanding acceptance:
+- Repeat the final source through the installed UI and the multi-window workload
+  when disposable test windows are appropriate. Do not infer that from unit tests.
+- The Documents purpose string and final close guard are newer than the installed
+  build, as is the SQLite connection-lifetime fix. Build 2026101504 is the next
+  candidate; final deployment/publication is not yet complete.
+- The legacy uncertain partial-reopen record has not been discarded or replayed.
+  Its original trigger is not established; no repair of that record is claimed.

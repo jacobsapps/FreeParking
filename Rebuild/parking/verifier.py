@@ -13,11 +13,12 @@ class Observer:
         while True:
             try:
                 snapshot = self.observe()
+                is_ready = ready(snapshot)
             except Uncertain:
                 if time.monotonic() >= deadline: raise
                 time.sleep(0.2)
                 continue  # Startup changed mid-read; observe again, never launch again.
-            if ready(snapshot) or time.monotonic() >= deadline:
+            if is_ready or time.monotonic() >= deadline:
                 return snapshot
             time.sleep(0.2)
 
@@ -25,43 +26,88 @@ class Observer:
         # Neither a denied permission nor an unreadable process list is 'empty'.
         raw = self.terminal.windows()
         processes = self.processes.all()
-        windows, issues, tab_issues, resolved, candidates = [], {}, {}, {}, {}
+        windows, issues, tab_issues, resolved, candidates, unresolved = [], {}, {}, {}, {}, {}
         self.providers.begin_observation()
         try:
             for window in raw:
-                tabs, problems = [], []
                 for index, raw_tab in enumerate(window['tabs']):
-                    try:
-                        if len(raw_tab['sessions']) != 1:
-                            raise ParkingError('Split panes cannot yet be parked together.')
-                        tab = self.providers.identify(raw_tab['sessions'][0], processes)
-                        tabs.append(tab); resolved[tab.terminal_id] = tab
-                    except ParkingError as error:
-                        from .confirmation import ConfirmationRequired
-                        if isinstance(error, ConfirmationRequired):
-                            candidates[error.candidate['terminal_id']] = error.candidate
-                        problems.append('Tab ' + str(index + 1) + ': ' + str(error))
-                        for session in raw_tab['sessions']: tab_issues[session['id']] = str(error)
-                if not window['tabs']: problems.append('Empty window.')
-                if problems: issues[window['id']] = '\n'.join(problems)
-                else: windows.append(Window(window['id'], tuple(tabs)))
+                    for session in raw_tab['sessions']:
+                        try:
+                            # Split panes remain unparkable as a window, but a
+                            # known conversation in a pane must remain visible
+                            # to duplicate checks for other windows.
+                            tab = self.providers.identify(session, processes)
+                            resolved[tab.terminal_id] = tab
+                        except ParkingError as error:
+                            from .confirmation import ConfirmationRequired
+                            if isinstance(error, ConfirmationRequired):
+                                candidates[error.candidate['terminal_id']] = error.candidate
+                            tab_issues[session['id']] = str(error)
+                            unresolved[session['id']] = tuple(sorted(self.providers.candidates(session, processes)))
         finally:
-            self.providers.end_observation()
+            binding_failures = self.providers.end_observation() or {}
         # Prevent a read/process race from being represented as a good binding.
+        # Invalidate the affected tab, not unrelated stable windows.
         after = self.processes.all()
-        for w in windows:
-            if any(after.get(t.process.pid, {}).get('started') != t.process.started for t in w.tabs):
-                raise Uncertain('A process changed during inspection. Observe again; no mutation authorized.')
-        return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved, candidates)
+        def attached(tab, inventory):
+            session = {'tty': tab.tty}
+            # An idle shell's contract excludes all additional jobs. An agent
+            # can normally spawn tool processes: only new/changed agent
+            # candidates invalidate its exact ownership binding here.
+            return {(pid, p['started'], p['executable']) for pid, p in inventory.items()
+                    if p['tty'] == tab.tty and (tab.provider == 'shell' or
+                        self.providers.candidates(session, {pid: p}))}
+        for tid, tab in list(resolved.items()):
+            current = after.get(tab.process.pid, {})
+            changed = (current.get('started') != tab.process.started or current.get('tty') != tab.tty
+                       or attached(tab, processes) != attached(tab, after))
+            error = binding_failures.get(tab.process.pid)
+            if changed or error:
+                del resolved[tid]
+                tab_issues[tid] = error or 'This tab’s process changed during inspection. Observe again.'
+                unresolved[tid] = (tab.provider,) if tab.provider != 'shell' else ('claude', 'codex')
+        for window in raw:
+            tabs, problems = [], []
+            for index, raw_tab in enumerate(window['tabs']):
+                if len(raw_tab['sessions']) != 1:
+                    problems.append('Tab ' + str(index + 1) + ': Split panes cannot yet be parked together.')
+                for session in raw_tab['sessions']:
+                    tid = session['id']
+                    if tid in resolved: tabs.append(resolved[tid])
+                    else:
+                        # A new provider seen in the second process read must
+                        # not disappear from the uncertainty/duplicate guard.
+                        unresolved[tid] = tuple(sorted(set(unresolved.get(tid, ())) |
+                            self.providers.candidates(session, after)))
+                    if tid in tab_issues:
+                        problems.append('Tab ' + str(index + 1) + ': ' + tab_issues[tid])
+            if not window['tabs']: problems.append('Empty window.')
+            if problems: issues[window['id']] = '\n'.join(problems)
+            else: windows.append(Window(window['id'], tuple(tabs)))
+        return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved, candidates, unresolved)
 
 
 class Verifier:
     @staticmethod
+    def resolved(observation):
+        # Older fixtures/records may supply only complete windows. Individual
+        # resolved tabs are authoritative even when their window is unparkable.
+        tabs = {t.terminal_id: t for w in observation.windows for t in w.tabs}
+        tabs.update(observation.resolved_tabs)
+        return tabs
+
+    @staticmethod
     def other_conversation_tabs(tab, observation, allowed_ids=()):
         if tab.provider == 'shell': return []
-        return [live for window in observation.windows for live in window.tabs
+        resolved = Verifier.resolved(observation)
+        matches = [live for live in resolved.values()
                 if live.terminal_id not in allowed_ids and
                 (live.provider, live.session_id) == (tab.provider, tab.session_id)]
+        if matches: return matches
+        unknown = observation.terminal_ids - resolved.keys() - set(allowed_ids)
+        if any(tab.provider in observation.unresolved_providers.get(tid, ('claude', 'codex')) for tid in unknown):
+            raise Uncertain('Another terminal has an unresolved '+tab.provider+' identity. Its conversation may already be open; nothing duplicated or changed.')
+        return []
 
     @staticmethod
     def source_open(record, observation):
@@ -84,13 +130,14 @@ class Verifier:
 
     @staticmethod
     def matching_tab(saved, target, observation):
-        window = observation.window(target['window_id'])
-        tab = next((t for t in window.tabs if t.terminal_id == target['terminal_id']), None) if window else None
-        if tab is None:
-            return False
+        tab = Verifier.resolved(observation).get(target['terminal_id'])
         raw = observation.raw_window(target['window_id'])
-        receipt = next((s.get('receipt') for t in raw['tabs'] for s in t['sessions']
-                        if s['id'] == target['terminal_id']), None)
+        if tab is None or raw is None:
+            return False
+        containing = [t for t in raw['tabs'] if any(s['id'] == target['terminal_id'] for s in t['sessions'])]
+        if len(containing) != 1 or len(containing[0]['sessions']) != 1:
+            return False  # The target itself must still be a single saved tab.
+        receipt = containing[0]['sessions'][0].get('receipt')
         return (receipt == target['receipt'] and tab.provider == saved.provider
                 and tab.session_id == saved.session_id and tab.cwd == saved.cwd
                 and tab.shell_command == saved.shell_command)

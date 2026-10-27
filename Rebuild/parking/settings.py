@@ -13,6 +13,12 @@ class Settings:
         if not self.path.exists(): return dict(DEFAULTS)
         return self.validate(json.loads(self.path.read_text()))
 
+    def read_optional(self):
+        """Broken optional message preferences must not prevent session recovery."""
+        try: return self.read()
+        except (OSError, ValueError, ParkingError):
+            return dict(DEFAULTS, auto_continue_interrupted=False)
+
     @staticmethod
     def validate(value):
         if not isinstance(value, dict) or set(value) != set(DEFAULTS):

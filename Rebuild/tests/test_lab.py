@@ -11,7 +11,7 @@ import shlex
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 sys.path.insert(0,str(Path(__file__).parents[1]))
 sys.path.insert(0,str(Path(__file__).parents[2]/'Resources'))
 from test_safety import Scope, ScopedTerminal, SafetyError
@@ -96,6 +96,104 @@ class LabTests(unittest.TestCase):
         self.assertEqual(len(set(first['folders']+second['folders'])),5)
         self.assertTrue(all(Path(p).is_dir() for p in first['folders']+second['folders']))
         self.assertEqual(len([c for c in self.os.calls if c[0]=='close']),1)
+
+    def test_lab_does_not_add_reconciliation_after_product_returns_pending(self):
+        fixture=self.lab.create(tabs=2)
+        from parking.operations import Operations, Outcome
+        checks=[]
+        def pending_operation(runner, record_id):
+            checks.append(record_id)
+            record=runner.workflow.store.load(record_id)
+            return Outcome(record, 'checking', 'Still unconfirmed')
+        with patch('parking.lab.Operations.reopen', new=pending_operation), \
+             patch('parking.workflow.Workflow.reconcile', side_effect=AssertionError('Test-only completion loop')):
+            with self.assertRaisesRegex(ParkingError, 'Still unconfirmed'):
+                self.lab.round_trip(fixture['window_id'],self.wait)
+        self.assertEqual(len(checks),1)
+        self.assertEqual([c[0] for c in self.os.calls],['create','create','close'])
+
+    def test_batched_fixture_setup_settles_once_after_all_exact_create_receipts(self):
+        composer=self.lab.composer
+        checks=[]
+        def composed():
+            store,observer,flow=composer()
+            original=observer.observe_until
+            def settle(ready):
+                checks.append(len([c for c in self.os.calls if c[0]=='create']))
+                return original(ready)
+            observer.observe_until=settle
+            return store,observer,flow
+        self.lab.composer=composed
+        fixture=self.lab.create(tabs=5,settle_each=False)
+        self.assertEqual(checks,[5])
+        self.assertEqual(fixture['state'],'open')
+        self.assertEqual(len(fixture['session_ids']),5)
+        self.assertEqual(self.os.windows()[:2],self.baseline)
+
+    def test_batched_setup_never_marks_mismatched_final_receipts_open(self):
+        composer=self.lab.composer
+        def composed():
+            store,observer,flow=composer()
+            # Return an incomplete final read without waiting; it must not make
+            # the existing raw create acknowledgements a successful fixture.
+            observer.observe_until=lambda ready: type('Missing',(),{'window':lambda self,wid:None})()
+            return store,observer,flow
+        self.lab.composer=composed
+        with self.assertRaisesRegex(ParkingError,'No parking attempted'):
+            self.lab.create(tabs=5,settle_each=False)
+        fixture=next(iter(self.scope.data['fixtures'].values()))
+        self.assertEqual(fixture['state'],'creating')
+        self.assertEqual(len(fixture['session_ids']),5)
+        self.assertEqual([c[0] for c in self.os.calls],['create']*5)
+        self.assertEqual(self.os.windows()[:2],self.baseline)
+
+    def test_batched_mixed_setup_validates_each_exact_agent_identity(self):
+        from dataclasses import replace
+        import uuid
+        from parking.agents import command
+        self.lab.seeder=Mock()
+        self.lab.seeder.seed.side_effect=lambda provider,folder,busy: dict(provider=provider,cwd=folder,session_id=str(uuid.uuid4()))
+        composer=self.lab.composer
+        expected=[]
+        def composed():
+            store,observer,flow=composer()
+            original=observer.observe
+            def settle(ready):
+                snapshot=original()
+                window=snapshot.windows[-1]
+                agents=self.scope.data['fixture_agents']
+                tabs=tuple(replace(t,provider=a['provider'],session_id=a['session_id']) for t,a in zip(window.tabs,agents))
+                observed=replace(snapshot,windows=(replace(window,tabs=tabs),))
+                expected.append(ready(observed))
+                # Same valid terminal receipts/folders but wrong exact agent ID
+                # must fail readiness even though the window resolves completely.
+                wrong=replace(tabs[-1],session_id=str(uuid.uuid4()))
+                bad=replace(observed,windows=(replace(window,tabs=tabs[:-1]+(wrong,)),))
+                self.assertFalse(ready(bad))
+                return observed
+            observer.observe_until=settle
+            return store,observer,flow
+        self.lab.composer=composed
+        def launch(adapter,tab,receipt,prompt=None):
+            return command(tab,receipt,[tab.provider,'resume',tab.session_id],prompt)
+        with patch('parking.agents.Claude.launch',new=launch),patch('parking.agents.Codex.launch',new=launch):
+            fixture=self.lab.create(tabs=5,provider='mixed',settle_each=False)
+        self.assertEqual(expected,[True])
+        self.assertEqual(fixture['state'],'open')
+        self.assertEqual([a['provider'] for a in fixture['agents']],['claude','codex','claude','codex','claude'])
+        self.assertEqual(len([c for c in self.os.calls if c[0]=='create']),5)
+
+    def test_batched_setup_still_refuses_protected_window_changes_between_creates(self):
+        call=self.os.call
+        def changing(action,**kwargs):
+            result=call(action,**kwargs)
+            if action=='create':
+                self.os.raw[0]['tabs'].append(dict(sessions=[dict(id='user-added',tty='/dev/new',title='Work')]))
+            return result
+        self.os.call=changing
+        with self.assertRaises(SafetyError):self.lab.create(tabs=5,settle_each=False)
+        self.assertEqual(len([c for c in self.os.calls if c[0]=='create']),1)
+        self.assertFalse(any(c[0]=='close' for c in self.os.calls))
 
     def test_repeated_complete_cycles_use_updated_selected_window(self):
         fixture=self.lab.create(tabs=2)

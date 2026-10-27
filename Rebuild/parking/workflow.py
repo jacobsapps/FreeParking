@@ -1,4 +1,5 @@
 """A restartable per-window workflow. No OS calls and no display-dependent logic."""
+import datetime
 import uuid
 from .model import ParkingError, NotSubmitted, Phase, Uncertain, Window
 from .verifier import Verifier
@@ -12,6 +13,12 @@ class Workflow:
     def note(self, record, error):
         # Keep phase and intent: error strings never decide what happens next.
         record['issue'] = str(error)
+        record['issue_kind'] = ('not_submitted' if isinstance(error, NotSubmitted) else
+                                'uncertain' if record['intent'] or isinstance(error, Uncertain) else 'failed')
+        # Retain the original failure even if a later retry reports another issue.
+        record['events'].append(dict(phase=record['phase'], intent=record['intent'],
+            issue=str(error), error_type=type(error).__name__,
+            at=datetime.datetime.now(datetime.timezone.utc).isoformat()))
         self.store.save(record)
         return record
 
@@ -28,10 +35,22 @@ class Workflow:
             record, _ = self.store.begin(window)
             if record['phase'] != Phase.SAVED.value or record['intent']:
                 raise ParkingError('An earlier operation needs reconciliation before parking again.')
-            if any(t.provider != 'shell' and t.activity == 'unknown' for t in window.tabs):
+            if any(t.provider == 'codex' and t.activity == 'unknown' for t in window.tabs):
                 raise ParkingError('Cannot confirm agent activity. Nothing interrupted.')
             record['source'] = window.encode()
-            record['interruptions'] = {}  # A cancelled earlier attempt grants no future auto-send.
+            # A retry may retain continuation only when the provider re-observes
+            # that exact interrupted turn as its latest persisted request.
+            previous = record.get('interruptions', {})
+            kept = {}
+            for i, tab in enumerate(window.tabs):
+                outcome = previous.get(str(i))
+                provider = self.gate.providers.get(tab.provider)
+                current = getattr(provider, 'interruption_current', None)
+                if outcome and tab.activity == 'idle' and current:
+                    try: eligible = current(tab, outcome)
+                    except Exception: eligible = False  # Optional message evidence, not session identity.
+                    if eligible: kept[str(i)] = outcome
+            record['interruptions'] = kept
             record['close_interruptions'] = {}
             self.store.save(record)
             for index, tab in enumerate(window.tabs):
@@ -40,8 +59,13 @@ class Workflow:
                 provider = self.gate.providers.get(tab.provider)
                 prepare = getattr(provider, 'prepare_close_interruption', None)
                 if prepare:
-                    record['close_interruptions'][str(index)] = prepare(tab)
-                    self.store.save(record)
+                    try:
+                        checkpoint = prepare(tab)
+                    except Exception:
+                        checkpoint = None  # No continuation evidence is not lost session recovery.
+                    if checkpoint is not None:
+                        record['close_interruptions'][str(index)] = checkpoint
+                        self.store.save(record)  # Journal failures are never optional.
                     continue
                 receipt = self.store.transition(record, Phase.INTERRUPTING, {'kind':'interrupt', 'index':index})
                 try:
@@ -49,7 +73,10 @@ class Workflow:
                     record.setdefault('interruptions', {})[str(index)] = outcome
                     self.store.transition(record, Phase.SAVED)
                 except Exception as error:
-                    return self.note(record, error)  # Keep uncertain interruption, never replay.
+                    record = self.store.load(record['id'])
+                    if isinstance(error, NotSubmitted):
+                        self.store.transition(record, Phase.SAVED)
+                    return self.note(record, error)  # Unknown submissions remain pending, never replayed.
             receipt = self.store.transition(record, Phase.CLOSING, {'kind': 'close'})
             error = None
             try:
@@ -62,11 +89,12 @@ class Workflow:
                 if Verifier.source_absent(record, after):
                     self.confirm_closed(record)
                 elif Verifier.source_open(record, after):
-                    if isinstance(error, Uncertain):
+                    if error is not None and not isinstance(error, NotSubmitted):
                         # The AppleEvent may still be showing a confirmation.
                         # A timeout is not cancellation and must not permit replay.
                         self.note(record, 'Close is still unconfirmed. Check the iTerm confirmation; recovery is saved. ' + str(error))
                     else:
+                        if error is None: record['interruptions'] = {}  # Cancellation grants no future auto-send.
                         self.store.transition(record, Phase.SAVED, issue=str(error) if error else 'Close cancelled; the original window is still open.')
                 else:
                     self.note(record, error or Uncertain('Some original tabs changed or remain open. Check again before another action.'))
@@ -80,7 +108,11 @@ class Workflow:
             provider = self.gate.providers.get(tab.provider)
             if hasattr(provider,'finish_close') and not provider.client_closed(tab):
                 receipt=self.store.transition(record,Phase.CLOSING,dict(kind='stop_client',index=index))
-                self.gate.stop_closed_client(receipt)
+                try:
+                    self.gate.stop_closed_client(receipt)
+                except NotSubmitted:
+                    self.store.transition(record,Phase.CLOSING,{'kind':'close'})
+                    raise
                 self.store.transition(record,Phase.CLOSING,{'kind':'close'})
         for index, checkpoint in record.get('close_interruptions', {}).items():
             if index in record.get('interruptions', {}): continue
@@ -93,7 +125,11 @@ class Workflow:
             if hasattr(provider, 'set_archived') and record.get('native_archives', {}).get(str(index)) is not True:
                 receipt = self.store.transition(record, Phase.CLOSING,
                     dict(kind='native_archive', index=index, archived=True))
-                self.gate.native_archive(receipt)
+                try:
+                    self.gate.native_archive(receipt)
+                except NotSubmitted as error:
+                    self.store.transition(record, Phase.CLOSING, {'kind':'close'})
+                    raise error
                 record.setdefault('native_archives', {})[str(index)] = True
                 self.store.transition(record, Phase.CLOSING, {'kind':'close'})
         self.store.transition(record, Phase.PARKED)
@@ -101,6 +137,14 @@ class Workflow:
     def reconcile_record(self, record, snapshot, finish_closing=True):
         source = Window.decode(record['source'])
         intent = record['intent']
+        if intent and intent['kind'] == 'interrupt':
+            tab = source.tabs[intent['index']]
+            observe = getattr(self.gate.providers.get(tab.provider), 'observe_interruption', None)
+            outcome = observe(tab) if observe else None
+            if outcome is None: return record
+            record.setdefault('interruptions', {})[str(intent['index'])] = outcome
+            self.store.transition(record, Phase.SAVED)
+            return record  # Explicit Park retry revalidates current turns before closing.
         if intent and intent['kind'] == 'stop_client':
             tab=source.tabs[intent['index']]
             if not self.gate.providers.get(tab.provider).client_closed(tab): return record
@@ -123,6 +167,10 @@ class Workflow:
                 self.store.transition(record, Phase.CHECKING)
         if record['phase'] in (Phase.CLOSING.value, Phase.SAVED.value) and Verifier.source_absent(record, snapshot):
             if finish_closing: self.confirm_closed(record)
+            elif record['phase'] == Phase.CLOSING.value and record['intent'] == {'kind':'close'}:
+                if not record.get('close_confirmed'):
+                    record['close_confirmed'] = True
+                    self.store.save(record)
         elif record['phase'] in (Phase.OPENING.value, Phase.CHECKING.value, Phase.SAVED.value) and Verifier.returned(record, snapshot):
             self.store.transition(record, Phase.RETURNED)
         return record
@@ -133,12 +181,29 @@ class Workflow:
             record = self.store.load(record_id)
             return self.reconcile_record(record, self.observer.observe(), finish_closing=not read_only)
 
+    def finish_parking(self, record_id):
+        """Explicitly finish an already-closed window, never close/reopen a tab."""
+        initial = self.store.load(record_id)
+        with self.store.operation(initial['source']['window_id']):
+            record = self.store.load(record_id)
+            if record['phase'] == Phase.PARKED.value: return record
+            snapshot = self.observer.observe()
+            if (record['phase'] != Phase.CLOSING.value or record['intent'] != {'kind':'close'}
+                    or not Verifier.source_absent(record, snapshot)):
+                raise ParkingError('Only a confirmed closed window can finish parking. No terminal was changed.')
+            try:
+                self.confirm_closed(record)
+            except Exception as error:
+                record = self.store.load(record_id)
+                self.note(record, error)
+            return record
+
     def reopen(self, record_id):
         initial = self.store.load(record_id)
         with self.store.operation(initial['source']['window_id']):
             record = self.store.load(record_id)
             snapshot = self.observer.observe()
-            self.reconcile_record(record, snapshot)
+            self.reconcile_record(record, snapshot, finish_closing=False)
             if record['phase'] in (Phase.CLOSING.value, Phase.INTERRUPTING.value) and record['intent']:
                 return record  # A pending close cannot be called returned or reopened.
             if Verifier.returned(record, snapshot):
@@ -148,7 +213,8 @@ class Workflow:
             if record['phase'] == Phase.RETURNED.value:
                 raise ParkingError('This backup has already returned. It is retained, not automatically reopened.')
             if record['intent']:
-                return self.note(record, Uncertain('An earlier operation has no confirmed result. Nothing was repeated; check the disposable terminal.'))
+                if record.get('issue'): return record  # Preserve the actual cause, not a generic retry error.
+                return self.note(record, Uncertain('An earlier operation has no confirmed result. Nothing was repeated; recovery is retained.'))
             if not Verifier.source_absent(record, snapshot):
                 return self.note(record, Uncertain('Original tabs are still open but changed. No duplicate window was created.'))
             source = Window.decode(record['source'])
@@ -163,7 +229,7 @@ class Workflow:
                 if target['terminal_id'] not in snapshot.terminal_ids:
                     return self.note(record, Uncertain('A previously returned tab closed. Recovery is retained; no automatic duplicate/reordering attempted.'))
             wid = next((t['window_id'] for t in record['targets'].values()), None)
-            settings = Settings(self.store.root).read()
+            settings = Settings(self.store.root).read_optional()
             for index, tab in enumerate(source.tabs):
                 if str(index) in record['targets']:
                     continue
@@ -175,10 +241,22 @@ class Workflow:
                         record['native_archives'][str(index)] = False
                         self.store.transition(record, Phase.CHECKING)
                     except Exception as error:
-                        return self.note(self.store.load(record_id), error)
+                        record = self.store.load(record_id)
+                        if isinstance(error, NotSubmitted):
+                            self.store.transition(record, Phase.CHECKING)
+                            return self.note(record, NotSubmitted(
+                                'Tab '+str(index+1)+' (“'+tab.title+'”): restore preparation failed before any unarchive request was sent. '
+                                'Already opened tabs were kept. You can retry reopening. '+str(error)))
+                        return self.note(record, error)
                 token = str(uuid.uuid4())
                 intent = dict(kind='create', index=index, receipt=token, window_id=wid)
-                message = continuation_message(tab, record.get('interruptions', {}).get(str(index)), settings)
+                interruption = record.get('interruptions', {}).get(str(index))
+                message = continuation_message(tab, interruption, settings)
+                current = getattr(self.gate.providers.get(tab.provider), 'interruption_current', None)
+                if message is not None and current:
+                    try: eligible = current(tab, interruption)
+                    except Exception: eligible = False
+                    if not eligible: message = None  # Reopen the session without optional text.
                 if message is not None:
                     intent['continue_message'] = message  # Durable before exec; never re-send on retry.
                 receipt = self.store.transition(record, Phase.OPENING, intent)

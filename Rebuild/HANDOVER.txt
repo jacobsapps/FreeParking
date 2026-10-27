@@ -1,0 +1,216 @@
+FREE PARKING REPAIR HANDOVER
+2026-10-27
+
+STATUS: UNFINISHED. REOPENING IS STILL BROKEN IN REAL USE.
+This branch is a work-in-progress handover, not a release or deployment approval.
+Read this file before treating passing component tests as product acceptance.
+
+What the user needs
+-------------------
+Park selected iTerm windows containing Claude and Codex sessions, then reopen
+ALL tabs with their exact saved session IDs, directories and ordering. Preserve
+all unrelated working windows. Titles are display metadata only. Optional
+"please continue" for interrupted work must never block session recovery.
+The original parking/car UI and a prominent Park my windows button are expected.
+The user also needs the saved tab names to be discoverable, not just tab one's
+name, and parking must not take minutes with opaque sequential progress.
+
+Latest production incident, 2026-10-27
+-------------------------------------
+Read-only inspection of the actual installed app and recovery database found:
+- Installed version: 0.4.3, build 2026101503.
+- Two records were created in the same Park All batch at 10:14:46 UTC.
+- One saved window has TWO source tabs, but only ONE returned target.
+  At 10:17:28 UTC its second-tab preparation failed BEFORE an unarchive request:
+  "Cannot inspect iTerm ... Can't get object. (-1728)".
+  Durable phase: checking. Intent: null. Issue kind: not_submitted.
+- Another saved window has SEVEN source tabs, but only ONE returned target.
+  At 10:17:39 UTC its second create was rejected BEFORE submission by the JXA
+  exact-target guard: "The exact target changed. No window operation was
+  performed." At 10:18:22 UTC a subsequent attempt stopped at the Python guard:
+  "The returned window changed. No tab was appended."
+  Durable phase: checking. Intent: null. Issue kind: not_submitted.
+- The user described one of six tabs reopening. Do not contradict the user's
+  experience by treating the stored seven-tab source count as a complete picture.
+- A later park attempt retained a two-tab source after close cancellation; a
+  separate one-tab record was saved but had not progressed. No data was deleted.
+- The card caption is intentionally derived from the first tab's title. The
+  recovery records retain all saved tab entries. Tooltip/details exist, but the
+  user did not discover or experience those as an adequate list of saved tabs.
+
+What these observations DO NOT prove
+------------------------------------
+We have NOT established why the restored window's topology differed, whether
+an iTerm object reference became stale, whether the first resumed client
+changed anything, or whether another actor added/moved a tab. Do not blindly
+remove exact-target guards or adopt existing user tabs as app-owned targets.
+The saved timestamps above are failure timestamps, not measured park duration.
+There is no measured per-stage latency profile yet.
+No auto-retry was performed on the user's recovery records during this diagnosis.
+
+Safety and preservation
+-----------------------
+No global quit/kill, keyboard broadcasting, synthetic typing, preference/trust
+changes, or closing existing user work. Use fresh protective scopes and recorded
+native create receipts for disposable fixtures. Never replace an old baseline
+to make a failed test pass. Normal close confirmation remains enabled.
+Cleanup only windows proven owned by original receipts. A cleanup helper is in
+Rebuild/cleanup.py. Preserve failed reports and durable recovery.
+Do not copy the user's production database to GitHub. It contains private paths,
+titles and session IDs. This handover deliberately omits those values.
+User explicitly requested cleanup of noisy test windows; all three remaining
+owned test windows were closed on October 15. No new test windows were created
+on October 27 before this handover. Do not open a large unattended test matrix.
+
+Architecture and useful files
+-----------------------------
+Sources/FreeParking/Models.swift:
+  Garage UI model, LocalBackend subprocess bridge and OperationCompletion.
+Sources/FreeParking/GarageView.swift:
+  Original parking UI, first-tab caption, tab-name hover text, saved cars.
+Rebuild/garage_backend.py and parking/garage.py:
+  Production dispatch and Park All loop. Saves every source before mutations;
+  processes windows sequentially and stops the batch on a non-parked outcome.
+Rebuild/parking/workflow.py:
+  Durable per-window lifecycle, interruption, close, archive/unarchive, per-tab
+  creation, exact receipt reconciliation and partial-return retry behavior.
+Rebuild/parking/operations.py:
+  Bounded production completion. Checks observe; they never blindly replay
+  submitted mutations. Explicit Finish parking handles late confirmed closure.
+Rebuild/parking/safety.py:
+  Durable permission gates. prepare_create compares saved returned target IDs
+  to the current entire destination-window tab list before appending.
+Rebuild/parking/terminal.js:
+  JXA inventory and exact-target create/close operations. Its exact() guard also
+  compares the entire target session list. Individual object reads are not an
+  atomic iTerm snapshot; inspect this boundary for the -1728 incident.
+Rebuild/parking/verifier.py:
+  Read-only native/process/provider observation, target matching, duplicate
+  conversation detection and result verification.
+Rebuild/parking/agents.py, codex_identity.py, codex_rpc.py:
+  Exact Claude registry/saved-session binding and Codex native endpoint/thread
+  binding, shared-server turn interruption, native archive and launch adapters.
+Rebuild/parking/store.py:
+  SQLite recovery, operation locking, durable intent and event history.
+Resources/test_safety.py:
+  Outer disposable scope guard, immutable protected baseline and owned receipts.
+
+Working source versus installed app
+-----------------------------------
+This branch includes the uncommitted repair work accumulated since main's
+004d345 checkpoint. It is now committed for handover, NOT certified as a release.
+The candidate build number is 2026101504; it has not been installed.
+The installed 2026101503 already includes most lifecycle repair work and is the
+build that failed on October 27. The candidate differs in these functional areas:
+- Final close gate rechecks newly appeared competing conversations.
+- Codex archive-state SQLite reads explicitly close their connections.
+- Documents-folder permission purpose string added to the app plist.
+Those later changes are NOT claimed to fix today's partial-restore failures.
+The Swift executable's signed hash also changes when rebuilt/signed; do not use
+that alone to infer a source behavior change.
+
+Repair work already implemented
+-------------------------------
+- Separate definite pre-submission refusals from unknown submitted outcomes.
+  Retry may continue remaining tabs only when prior mutation is known not sent.
+- Keep original exceptions in durable event history instead of overwriting them.
+- Make Codex inventory invalidation target-local; retain resolved bindings from
+  otherwise unsupported windows for duplicate guards.
+- Reconcile a lost Codex interrupt acknowledgement by exact turn identity,
+  without sending a duplicate interrupt.
+- Share bounded completion semantics between production and the helper harness.
+- Treat missing/changed/completed/unreadable Claude request metadata as no
+  optional continuation credit, not missing exact-session recovery.
+- Disable optional auto-text for unreadable settings rather than block restore.
+- Recheck optional continuation just before launch; omit stale text but still
+  open the exact session. Never send the message again as a separate retry.
+- Preserve exact identity, durable saves, process shutdown, Codex shared-server
+  interruption and archive confirmation requirements.
+- Add test-only protected-additions opt-in for NEW scopes: extra user tabs may
+  appear while every original protected tab remains in its original window/order.
+
+Why it may be slow (code evidence, not a measured diagnosis)
+----------------------------------------------------------
+Park All serializes windows; each workflow serializes tabs. Observer calls read
+all terminal windows, process lists and provider identities repeatedly. Gates,
+archive authorization and post-operation verification can repeat full scans.
+Process cwd/listener checks use subprocesses. Codex calls initialize local RPC
+connections. Client shutdown has a bounded wait of up to 45 seconds per client;
+operation completion and observer settling add their own bounded waits.
+Measure actual stages and call counts before changing safety checks. Prefer
+reusing a coherent observation within a bounded operation over removing guards
+or adding unsafe broad parallel mutations. Native operations are not an atomic
+transaction, so individual subsystem passes did not prove their combined timing.
+
+Verification actually completed
+-------------------------------
+Latest checked source: 290 Rebuild Python tests and 171 outer Python tests pass.
+Swift model/bridge tests and offline JXA object-model tests pass. Privacy
+preflight found no findings at that checkpoint. These are not UI acceptance.
+Earlier native production-helper runs, before the final guard/SQLite changes:
+- One busy two-tab mixed Claude/Codex window parked and reopened. Each exact
+  session returned, each transcript had exactly one continuation message.
+- One idle five-tab mixed window parked and reopened. Five exact sessions
+  returned, no continuation message was sent.
+- Protected original work-window identities/order remained intact.
+- Installed-app startup initially blocked on Documents permission; the user
+  allowed it. A later normal installed UI read-only scan completed and its
+  rendered model was inspected. No installed-UI park/reopen cycle was completed.
+- A four-window live setup stopped during read-only enumeration with the Mac
+  locked, before parking. It did not pass. A simulated four-window/twenty-tab
+  production dispatch test passes, but uses fake terminal/provider boundaries.
+- October 27 production failures override any broad inference from old passes.
+
+Commands (offline first)
+------------------------
+python3 -m unittest discover -s Rebuild/tests -q
+python3 -m unittest discover -s tests -p 'test*.py' -q
+bash scripts/test-garage-contract.sh
+node Rebuild/tests/test_terminal.js
+python3 scripts/check-release-files.py
+git diff --check
+bash scripts/build-app.sh
+
+Native tools, when a disposable test is appropriate
+--------------------------------------------------
+bash Rebuild/build-test-tools.sh
+Rebuild/prove_garage.py --help
+Rebuild/cleanup.py --help
+The acceptance helper takes --run, a FRESH --directory, exact bundle --backend,
+--windows and --tabs; optional --busy and --allow-protected-additions.
+Start with ONE mixed window and promptly clean it up, using original receipts.
+The helper tests the production backend subprocess, not actual UI clicks.
+Rebuild/testing/ScopedAppControls.swift targets only the exact installed app
+PID, canonical test scope and control identifier. It cannot target normal live
+mode. It is not bundled. Full UI orchestration was a private local artifact and
+is not portable with this branch; it never completed an action in the old run.
+App installation: bash scripts/build-app.sh --install, only after verification.
+It requires Free Parking to be quit, backs up the app and preserves recovery.
+Do not quit iTerm. Never leave an installed test-scoped app as the user's app.
+
+Next engineer's priorities
+--------------------------
+1. Reproduce second-tab append failure through the installed app with one mixed
+   disposable window. Log expected/observed window/session IDs and native call
+   timings locally. Test snapshot changes between Python preflight and JXA.
+2. Make transient read failures retryable as READS with bounded fresh snapshots,
+   while preserving submitted-mutation uncertainty. Do not equate -1728 with an
+   empty desktop or assume a failed mutation was not sent.
+3. Determine why the destination's actual tab list differs. Keep unrelated tabs
+   safe and avoid duplicate conversations. Test extra/moved tabs and startup
+   churn explicitly; the correct policy must not merely hide the failure.
+4. Profile parking stages on real mixed windows; eliminate redundant work without
+   weakening final target checks. Present useful per-window/tab progress.
+5. Show actual saved tab names clearly, with an explicit restored-count state
+   when only part of a window returned. Never imply full restoration from one tab.
+6. Test exact session recovery independently of optional task completion, full
+   multi-tab and multi-window restore, restart/retry, and receipt-owned cleanup.
+7. Only then deploy/publish a verified fix. Today's push is a handover snapshot.
+
+Local evidence on original Mac (NOT included in Git)
+----------------------------------------------------
+.local/Verification/2026-10-27-user-incident/records-readonly.json
+.local/Verification/2026-10-15-session-first-install/
+Rebuild/STATUS.txt contains the chronological, qualified prior checkpoints.
+Raw databases, transcripts, screenshots, session identities and absolute private
+paths intentionally remain on the original machine.

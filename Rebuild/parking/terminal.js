@@ -27,15 +27,18 @@ function run(argv) {
         }))})));
     }
     if (request.action === 'close') {
-        const w = exact();
+        let w;
+        try { w = exact(); } catch (error) { return JSON.stringify({notSubmitted:String(error)}); }
         w.close(); // Normal confirmation. Never force or approve it ourselves.
         return JSON.stringify({acknowledged:true});
     }
     if (request.action === 'create') {
-        if (typeof request.command !== 'string' || !request.command) throw new Error('Missing launch specification.');
         let w, t;
+        try {
+            if (typeof request.command !== 'string' || !request.command) throw new Error('Missing launch specification.');
+            if (request.windowId !== null) w = exact();
+        } catch (error) { return JSON.stringify({notSubmitted:String(error)}); }
         if (request.windowId !== null) {
-            w = exact();
             t = w.createTabWithDefaultProfile({command:request.command});
         } else {
             w = app.createWindowWithDefaultProfile({command:request.command});

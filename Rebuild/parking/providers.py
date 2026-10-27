@@ -68,14 +68,21 @@ class Providers:
             if hook:hook()
 
     def end_observation(self):
+        invalid = {}
         for provider in self.items.values():
             hook=getattr(provider,'end_observation',None)
-            if hook:hook()
+            if hook: invalid.update(hook() or {})
+        return invalid
 
-    def identify(self, session, processes):
+    @staticmethod
+    def candidates(session, processes):
         attached = [p for p in processes.values() if p['tty'] == session['tty']]
         agents = {('codex' if Path(p['executable']).name == 'codex' else 'claude')
                   for p in attached if Path(p['executable']).name in ('codex','claude') or '/claude/' in p['executable']}
+        return agents
+
+    def identify(self, session, processes):
+        agents = self.candidates(session, processes)
         if len(agents) > 1: raise ParkingError('Multiple agent providers share this terminal.')
         name = next(iter(agents), 'shell')
         return self.get(name).identify(session, processes)

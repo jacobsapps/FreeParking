@@ -13,6 +13,7 @@ from .safety import Gate
 from .store import Store
 from .verifier import Observer
 from .workflow import Workflow
+from .operations import Operations
 
 DEFAULT_ROOT = Path.home() / 'Library/Application Support/Free Parking/Recovery-v2'
 
@@ -75,11 +76,14 @@ def dispatch(arguments, root=DEFAULT_ROOT):
             if not scope_path and not live:
                 raise ParkingError('Mutations are gated off without an explicit live-app or disposable-scope capability.')
             if action == 'park' and len(arguments) == 3:
-                workflow.park(arguments[1], arguments[2])
+                outcome=Operations(workflow).park(arguments[1], arguments[2])
             elif action == 'reopen' and len(arguments) == 2:
-                workflow.reopen(arguments[1])
+                outcome=Operations(workflow).reopen(arguments[1])
             else:
                 raise ParkingError('Invalid operation arguments.')
+            reply['operation_status']=outcome.status
+            if outcome.status=='needs_action':reply.update(ok=False,error=outcome.detail)
+            elif outcome.status=='checking':reply['message']=outcome.detail
         else:
             raise ParkingError('Unknown rebuild operation.')
     except Exception as error:

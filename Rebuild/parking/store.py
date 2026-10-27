@@ -46,7 +46,7 @@ def validate(record):
         if index not in {str(i) for i in range(len(source.tabs))}:
             raise ParkingError('Invalid interruption tab index.')
         tab = source.tabs[int(index)]
-        if (not isinstance(outcome, dict) or outcome.get('outcome') not in ('interrupted', 'not_interrupted')
+        if (not isinstance(outcome, dict) or outcome.get('outcome') not in ('interrupted', 'not_interrupted', 'unconfirmed')
                 or outcome.get('session_id') != tab.session_id or outcome.get('provider') != tab.provider):
             raise ParkingError('Interruption receipt belongs to another session.')
     for index, checkpoint in record.get('close_interruptions', {}).items():
@@ -184,7 +184,8 @@ class Store:
         return current
 
     def transition(self, record, phase, intent=None, issue=None):
-        record.update(phase=phase.value, intent=intent, issue=issue)
+        record.update(phase=phase.value, intent=intent, issue=issue, issue_kind=None)
+        if phase != Phase.CLOSING: record.pop('close_confirmed', None)
         record['events'].append(dict(phase=phase.value, intent=intent, issue=issue))
         return self.save(record)
 

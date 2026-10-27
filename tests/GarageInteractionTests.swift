@@ -34,7 +34,7 @@ struct GarageInteractionTests {
         precondition(pendingTitles.allLaunchesRecorded && pendingTitles.awaitingTabNames)
         precondition(pendingTitles.hasReturned)
         precondition(garage.issue(for: pendingTitles) == nil)
-        precondition(pendingTitles.statusLabel == "Opened · awaiting check")
+        precondition(pendingTitles.statusLabel == "Opened, awaiting check")
         precondition(pendingTitles.tabNamesHelp == "1. Update the website\n2. Refactor the command parser\n3. Sketch a small prototype")
         var partial = pendingTitles
         partial.restoredTargets?.removeValue(forKey: "2")
@@ -51,7 +51,7 @@ struct GarageInteractionTests {
         precondition(garage.issue(for: failedParking)?.summary == "Parking incomplete")
         let acknowledgedFailure = pendingTitles.withStatus("attention", note: "Old failed acknowledgement")
         precondition(acknowledgedFailure.allLaunchesRecorded)
-        precondition(acknowledgedFailure.statusLabel == "Opened · awaiting check")
+        precondition(acknowledgedFailure.statusLabel == "Opened, awaiting check")
         precondition(garage.issue(for: acknowledgedFailure) == nil)
 
         garage.removeCar(a)
@@ -123,6 +123,29 @@ struct GarageInteractionTests {
         unverifiedV2.returnVerified = false
         precondition(unverifiedV2.allLaunchesRecorded && !unverifiedV2.hasReturned)
         precondition(unverifiedV2.needsAttention && garage.issue(for: unverifiedV2) != nil)
+        let checkingReply = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"operation_status":"checking","operation_id":"owned-record"}"#.utf8))
+        let completedReply = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"operation_status":"completed","operation_id":"owned-record"}"#.utf8))
+        var completionCalls: [[String]] = []
+        let completed = try OperationCompletion.call(["restore", "owned-record"]) { args in
+            completionCalls.append(args)
+            return completionCalls.count < 3 ? checkingReply : completedReply
+        }
+        precondition(completed.operationStatus == "completed")
+        precondition(completionCalls == [["restore", "owned-record"], ["check", "owned-record"], ["check", "owned-record"]])
+        completionCalls = []
+        let pending = try OperationCompletion.call(["restore", "owned-record"]) { args in
+            completionCalls.append(args); return checkingReply
+        }
+        precondition(pending.operationStatus == "checking" && completionCalls.count == 3)
+        precondition(completionCalls.filter { $0.first == "restore" }.count == 1)
+        var checkingCar = unverifiedV2.withStatus("checking", note: "Original unconfirmed request")
+        checkingCar.returnVerified = false
+        precondition(checkingCar.isChecking && !checkingCar.hasReturned && !checkingCar.needsAttention)
+        precondition(checkingCar.statusLabel == "Awaiting confirmation")
+        precondition(garage.issue(for: checkingCar) == nil)
+        let finishCar = checkingCar.withStatus("finish_parking", note: "Window closed")
+        precondition(finishCar.canFinishParking && !finishCar.isChecking && !finishCar.hasReturned)
+        precondition(!finishCar.needsAttention && finishCar.statusLabel == "Ready to finish parking")
         let confirmationReply = try decoder.decode(BackendResponse.self, from: Data(#"{"ok":true,"windows":[],"cars":[],"warnings":[],"confirmation":{"id":"challenge","entries":[{"terminal_id":"tab","window_number":1,"tab_number":2,"title":"Display name","name":"Saved name","session_id":"11111111-1111-4111-8111-111111111111","cwd":"/fixture"}]}}"#.utf8))
         precondition(confirmationReply.confirmation?.entries.first?.tabNumber == 2)
         precondition(confirmationReply.confirmation?.entries.first?.sessionId == "11111111-1111-4111-8111-111111111111")

@@ -12,7 +12,7 @@ import socket
 import struct
 import time
 import uuid
-from .model import ParkingError, Uncertain
+from .model import ParkingError, Uncertain, NotSubmitted
 
 
 class LocalWebSocket:
@@ -96,8 +96,13 @@ class CodexRPC:
             self._session.close();self._session=None
 
     def call(self, method, params, mutation=False, authorize=None):
-        if not self.socket.is_socket():raise ParkingError('The existing local Codex server is not available.')
-        transport=self._session or LocalWebSocket(self.socket)
+        try:
+            if not self.socket.is_socket():raise ParkingError('The existing local Codex server is not available.')
+            transport=self._session or LocalWebSocket(self.socket)
+        except Exception as error:
+            if mutation: raise NotSubmitted(str(error)) from error
+            raise
+        submitted=False
         deadline=time.monotonic()+30
         def response(identifier):
             for _ in range(1000):
@@ -120,10 +125,18 @@ class CodexRPC:
                 if permit is None:raise ParkingError('Codex interruption requires an exact owned-session permit.')
                 permit(params['threadId'],params.get('turnId'))
             self._next_id+=1;identifier=self._next_id
+            # Inventory/authorization has its own bounded wait. It must not
+            # consume the reply deadline before the mutation is even sent.
+            deadline=time.monotonic()+30
+            transport.connection.settimeout(30)
+            submitted=True  # A partial send is uncertain too; never replay it automatically.
             transport.send(dict(id=identifier,method=method,params=params))
             return response(identifier)
-        except (TimeoutError,socket.timeout) as error:
-            raise Uncertain('Codex request timed out; no automatic replay.') from error
+        except Exception as error:
+            if mutation and not submitted: raise NotSubmitted(str(error)) from error
+            if isinstance(error, (TimeoutError,socket.timeout)):
+                raise Uncertain('Codex request timed out; no automatic replay.') from error
+            raise
         finally:
             if self._session is None:transport.close()
 

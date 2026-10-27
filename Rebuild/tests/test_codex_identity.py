@@ -38,16 +38,16 @@ class IdentityTests(unittest.TestCase):
     def test_port_changes_during_inspection_are_rejected(self):
         self.processes.loopback_listeners.side_effect=[{'http://127.0.0.1:5001'},{'http://127.0.0.1:6001'}]
         with self.assertRaises(Uncertain):self.identity.resolve(self.pid)
-    def test_thread_set_changes_during_inspection_are_rejected(self):
+    def test_unrelated_thread_disappearing_during_inspection_does_not_invalidate_target(self):
         original=self.call;count=0
         def call(method,params):
             nonlocal count
             if method=='thread/loaded/list':
                 count+=1
-                if count==2:return dict(data=[self.sid])
+                if count>=2:return dict(data=[self.sid])
             return original(method,params)
         self.rpc.call.side_effect=call
-        with self.assertRaises(Uncertain):self.identity.resolve(self.pid)
+        self.assertEqual(self.identity.resolve(self.pid),self.sid)
     def test_incomplete_inventory_is_rejected(self):
         self.rpc.call.side_effect=lambda m,p:dict(data=[self.sid]) if m=='thread/loaded/list' else dict(data=[],nextCursor='more')
         with self.assertRaises(Uncertain):self.identity.resolve(self.pid)
@@ -69,7 +69,72 @@ class IdentityTests(unittest.TestCase):
     def test_binding_change_at_observation_end_is_detected(self):
         self.identity.begin_observation();self.identity.resolve(self.pid)
         self.rows[self.other]=self.rows[self.sid]
-        with self.assertRaises(Uncertain):self.identity.end_observation()
+        self.assertIn(self.pid.pid,self.identity.end_observation())
+
+    def test_unrelated_endpoint_changes_do_not_invalidate_target(self):
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        self.rows[self.other]=('http://127.0.0.1:6002','connected')
+        self.assertEqual(self.identity.end_observation(),{})
+
+    def test_new_unrelated_thread_does_not_invalidate_target(self):
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        new=str(uuid.uuid4());self.rows[new]=('http://127.0.0.1:6003','connected')
+        self.threads[new]=dict(id=new,source='cli')
+        self.assertEqual(self.identity.end_observation(),{})
+
+    def test_new_competing_owner_invalidates_target(self):
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        new=str(uuid.uuid4());self.rows[new]=self.rows[self.sid]
+        self.threads[new]=dict(id=new,source='cli')
+        self.assertIn(self.pid.pid,self.identity.end_observation())
+
+    def test_new_child_with_same_owner_does_not_invalidate_target(self):
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        new=str(uuid.uuid4());self.rows[new]=self.rows[self.sid]
+        self.threads[new]=dict(id=new,source={'subAgent':{'thread_spawn':{'parent_thread_id':self.sid}}})
+        self.assertEqual(self.identity.end_observation(),{})
+
+    def test_target_endpoint_change_invalidates_target(self):
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        self.rows[self.sid]=('http://127.0.0.1:6001','connected')
+        self.assertIn(self.pid.pid,self.identity.end_observation())
+
+    def test_missing_endpoint_fallback_is_invalidated_if_native_owner_appears(self):
+        self.rows[self.sid]=(None,'connected')
+        self.identity.begin_observation()
+        with self.assertRaises(ParkingError): self.identity.resolve(self.pid)
+        self.rows[self.sid]=('http://127.0.0.1:5001','connected')
+        self.assertIn(self.pid.pid,self.identity.end_observation())
+
+    def test_target_ancestry_change_invalidates_target_even_when_endpoints_stable(self):
+        self.rows[self.other]=self.rows[self.sid]
+        self.threads[self.other]['source']={'subAgent':{'thread_spawn':{'parent_thread_id':self.sid}}}
+        self.identity.begin_observation();self.identity.resolve(self.pid)
+        self.threads[self.other]['source']='cli'
+        self.assertIn(self.pid.pid,self.identity.end_observation())
+
+    def test_competitor_added_mid_inventory_is_inspected(self):
+        original=self.call;count=0;new=str(uuid.uuid4())
+        def call(method,params):
+            nonlocal count
+            if method=='thread/loaded/list':
+                count+=1
+                if count==2:
+                    self.rows[new]=self.rows[self.sid]
+                    self.threads[new]=dict(id=new,source='cli')
+            return original(method,params)
+        self.rpc.call.side_effect=call
+        with self.assertRaises(ParkingError):self.identity.resolve(self.pid)
+
+    def test_observation_binding_failure_is_scoped_to_process(self):
+        other_process=Process(51,'other birth','/dev/other','/bin/codex')
+        self.processes.all.return_value[51]=dict(started='other birth',tty='/dev/other')
+        self.processes.loopback_listeners.side_effect=lambda pid: {'http://127.0.0.1:5001' if pid==50 else 'http://127.0.0.1:5002'}
+        self.identity.begin_observation()
+        self.assertEqual(self.identity.resolve(self.pid),self.sid)
+        self.assertEqual(self.identity.resolve(other_process),self.other)
+        self.rows[self.other]=('http://127.0.0.1:6002','connected')
+        self.assertEqual(set(self.identity.end_observation()),{51})
 
     def test_settle_retries_a_read_race_without_repeating_any_mutation(self):
         from parking.verifier import Observer

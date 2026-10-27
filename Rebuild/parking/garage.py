@@ -6,6 +6,7 @@ import uuid
 from .model import ParkingError, Window
 from .service import compose, DEFAULT_ROOT
 from .settings import Settings
+from .operations import Operations, pending, finish_parking_available
 
 
 def tab_view(tab, index, issue=''):
@@ -38,6 +39,8 @@ def car_view(record, root):
     source=Window.decode(record['source'])
     statuses={'saved':'saved_open','interrupting':'saved_open','closing':'saved_open',
               'parked':'parked','opening':'restoring','checking':'attention','returned':'archived'}
+    if pending(record): statuses[record['phase']] = 'checking'
+    if finish_parking_available(record): statuses[record['phase']] = 'finish_parking'
     tabs=[tab_view(t,i) for i,t in enumerate(source.tabs)]
     from .agents import command
     from .providers import Shell
@@ -56,12 +59,13 @@ def car_view(record, root):
         pending_tab=record['intent'].get('index') if record.get('intent') else None)
 
 
-def park_all(store, observer, workflow, snapshot=None):
+def park_all(store, observer, workflow, snapshot=None, operations=None, outcomes=None):
+    operations = operations or Operations(workflow)
     snapshot=snapshot or observer.observe()
     if snapshot.issues:
         raise ParkingError('Nothing closed. Review the highlighted tabs before parking.')
     windows=list(snapshot.windows)
-    if any(t.provider != 'shell' and t.activity == 'unknown' for w in windows for t in w.tabs):
+    if any(t.provider == 'codex' and t.activity == 'unknown' for w in windows for t in w.tabs):
         raise ParkingError('Nothing closed. An agent has not reported its current activity; refresh before parking.')
     # Every window's recovery must be durable before the first interruption.
     for window in windows:
@@ -72,7 +76,9 @@ def park_all(store, observer, workflow, snapshot=None):
             store.verify(receipt)
     results=[]
     for window in windows:
-        record=workflow.park(window.window_id,window.fingerprint);results.append(record)
+        outcome=operations.park(window.window_id,window.fingerprint)
+        if outcomes is not None:outcomes.append(outcome)
+        record=outcome.record;results.append(record)
         if record['phase']!='parked':break  # Cancel/uncertainty stops the batch.
     return results
 
@@ -83,14 +89,16 @@ def dispatch(arguments, root=DEFAULT_ROOT):
     if args[:1]==['--test-scope']:scope=Path(args[1]);args=args[2:]
     store,observer,workflow=compose(root,scope_path=scope,live=live)
     root=store.root
+    operations=Operations(workflow)
     reply=dict(ok=True,windows=[],cars=[],archives=[],warnings=[],message='',error=None,
-               error_code=None,confirmation=None,verified_archived_ids=[],settings=Settings(root).read())
+               error_code=None,operation_status=None,operation_id=None,confirmation=None,verified_archived_ids=[],settings=Settings(root).read_optional())
     action=args[0] if args else 'list'
     try:
         if action not in ('list','scan','settings') and not (live or scope):
             raise ParkingError('A live-app or disposable-scope capability is required.')
         if action=='settings':
             if len(args)==2:reply['settings']=Settings(root).save(json.loads(args[1]))
+            else:reply['settings']=Settings(root).read()
         elif action=='scan':
             snapshot=observer.observe();reply['windows']=live_windows(snapshot)
             # Expose every raw window and affected tab even when resolution fails.
@@ -113,21 +121,37 @@ def dispatch(arguments, root=DEFAULT_ROOT):
                 snapshot = observer.observe()
                 reply['confirmation'] = prepare(root,snapshot,window_id)
             if reply['confirmation'] is None:
+                outcomes=[]
                 if window_id is None:
-                    results=park_all(store,observer,workflow,snapshot)
+                    results=park_all(store,observer,workflow,snapshot,operations,outcomes)
                 else:
                     window=snapshot.window(window_id)
                     if window is None: raise ParkingError('This window has unidentified tabs. Review its tab details; nothing closed.')
                     fingerprint=window.fingerprint if action=='park-confirmed' else args[2]
-                    results=[workflow.park(window_id,fingerprint)]
-                if results and results[-1]['phase']!='parked':
-                    reply.update(ok=False,error=results[-1].get('issue') or 'Parking is still being checked; recovery is retained.')
-                reply['windows']=live_windows(observer.observe())
+                    outcome=operations.park(window_id,fingerprint)
+                    results=[outcome.record];outcomes=[outcome]
+                if results:
+                    last=results[-1]
+                    status=outcomes[-1].status
+                    reply['operation_status']=status
+                    reply['operation_id']=last['id']
+                    if status=='needs_action':
+                        reply.update(ok=False,error=outcomes[-1].detail)
+                    elif status=='checking':
+                        reply['message']='Parking is awaiting confirmation. Recovery is saved; check the saved window’s status.'
+                try:reply['windows']=live_windows(observer.observe())
+                except Exception as error:reply['warnings'].append('Window list refresh did not complete: '+str(error))
             else:
                 reply['windows']=live_windows(snapshot)
-        elif action=='restore':
-            record=workflow.reopen(args[1])
-            if record['phase']!='returned':reply.update(ok=False,error=record.get('issue') or 'Opening is being checked. Nothing was duplicated.')
+        elif action in ('restore','check','finish-parking'):
+            outcome=(operations.reopen(args[1]) if action=='restore' else
+                     operations.finish_parking(args[1]) if action=='finish-parking' else
+                     Operations(workflow, seconds=5).check(args[1]))
+            reply['operation_id']=outcome.record['id']
+            reply['operation_status']=outcome.status
+            if finish_parking_available(outcome.record):reply['message']=outcome.detail
+            elif outcome.status=='needs_action':reply.update(ok=False,error=outcome.detail)
+            elif outcome.status=='checking':reply['message']=outcome.detail
         elif action in ('remove','unarchive'):
             # Presentation only: do not pretend native parking state changed.
             record=store.load(args[1])

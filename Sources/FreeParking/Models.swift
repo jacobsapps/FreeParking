@@ -96,17 +96,22 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return fractional.date(from: createdAt) ?? ISO8601DateFormatter().date(from: createdAt) ?? .distantPast
     }
+    var isChecking: Bool { status == "checking" }
+    var canFinishParking: Bool { status == "finish_parking" }
     var statusLabel: String {
-        if allLaunchesRecorded { return "Opened · awaiting check" }
+        if isChecking { return "Awaiting confirmation" }
+        if canFinishParking { return "Ready to finish parking" }
+        if allLaunchesRecorded { return "Opened, awaiting check" }
         switch status {
         case "parked": return "Parked"
-        case "restored": return "Opened · awaiting check"
-        case "saved_open": return "Saved · still open"
-        case "restoring": return allLaunchesRecorded ? "Opened · awaiting check" : "Restore interrupted"
+        case "restored": return "Opened, awaiting check"
+        case "saved_open": return "Saved, still open"
+        case "restoring": return allLaunchesRecorded ? "Opened, awaiting check" : "Restore interrupted"
         default: return "Needs attention"
         }
     }
     var needsAttention: Bool {
+        if isChecking || canFinishParking { return false }
         if let returnVerified { return status != "parked" && !returnVerified }
         return !["parked", "restored"].contains(status) && !allLaunchesRecorded
     }
@@ -136,6 +141,24 @@ struct BackendResponse: Decodable, Sendable {
     let verifiedArchivedIds: [String]?
     var settings: ParkingPreferences? = nil
     var confirmation: ResumeConfirmation? = nil
+    var operationStatus: String? = nil
+    var operationId: String? = nil
+}
+
+enum OperationCompletion {
+    /// Only observe the operation the user just requested. Never repeat Park or
+    /// Restore to make a pending result pass, and never scan unrelated records.
+    static func call(_ arguments: [String], checks: Int = 2,
+                     invoke: ([String]) throws -> BackendResponse) throws -> BackendResponse {
+        var response = try invoke(arguments)
+        guard ["park", "park-all", "park-confirmed", "restore", "check", "finish-parking"].contains(arguments.first ?? "") else { return response }
+        guard let operationID = response.operationId else { return response }
+        for _ in 0..<max(0, checks) {
+            guard response.operationStatus == "checking" else { break }
+            response = try invoke(["check", operationID])
+        }
+        return response
+    }
 }
 
 enum LocalBackend {
@@ -336,7 +359,9 @@ final class Garage: ObservableObject {
             } else { removePreviewCar(car.id, driveAway: true) }
             return
         }
-        perform(["restore", car.id], activity: "Opening in iTerm…", carID: car.id)
+        let action = car.canFinishParking ? "finish-parking" : (car.isChecking ? "check" : "restore")
+        let activity = car.canFinishParking ? "Finishing parking…" : (car.isChecking ? "Checking this window…" : "Opening in iTerm…")
+        perform([action, car.id], activity: activity, carID: car.id)
     }
 
     /// Reversible archive only: no terminal check or confirmation sheet.
@@ -423,7 +448,7 @@ final class Garage: ObservableObject {
             var failure: String?
             do {
                 let response = try await Task.detached(priority: .userInitiated) {
-                    try LocalBackend.call(arguments)
+                    try OperationCompletion.call(arguments, invoke: LocalBackend.call)
                 }.value
                 let previous = cars
                 let verifiedIDs = Set(response.verifiedArchivedIds ?? [])

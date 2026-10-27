@@ -48,7 +48,7 @@ class AgentContracts(unittest.TestCase):
         root=self.root/'claude';(root/'sessions').mkdir(parents=True);(root/'projects/project').mkdir(parents=True)
         record=dict(pid=31,pidDomain='darwin',kind='interactive',entrypoint='cli',procStart='UTC birth',sessionId=self.sid,cwd=str(self.root),status='busy')
         (root/'sessions/31.json').write_text(json.dumps(record))
-        (root/'projects/project'/(self.sid+'.jsonl')).write_text(json.dumps(dict(sessionId=self.sid,cwd=str(self.root),type='user'))+'\n')
+        (root/'projects/project'/(self.sid+'.jsonl')).write_text(json.dumps(dict(sessionId=self.sid,cwd=str(self.root),type='system'))+'\n')
         processes=Mock();processes.all.return_value={31:dict(started='birth')};processes.started_utc.return_value='UTC birth';processes.cwd.return_value=str(self.root)
         return Claude(processes,root),record
 
@@ -137,23 +137,23 @@ class AgentContracts(unittest.TestCase):
         append('assistant',message=dict(content=[],stop_reason='tool_use'))
         append('user',uuid='tool-id',message=dict(content=[dict(type='tool_result')]))
         self.assertEqual(provider.pending_request(self.tab,path),'request-id')
-        append('assistant',message=dict(content=[],stop_reason='end_turn'))
+        append('assistant',message=dict(content=[dict(type='text', text='done')],stop_reason='end_turn'))
         self.assertIsNone(provider.pending_request(self.tab,path))
 
     def test_claude_close_checkpoint_requires_a_persisted_request(self):
         provider,_=self.native_claude()
-        with self.assertRaises(ParkingError):provider.prepare_close_interruption(self.tab)
+        self.assertIsNone(provider.prepare_close_interruption(self.tab))
 
     def test_claude_close_checkpoint_checks_current_request_and_process_exit(self):
         provider,_=self.native_claude();request_id=str(uuid.uuid4())
-        provider.pending_request=Mock(return_value=request_id)
+        provider.request_state=Mock(return_value=dict(request_id=request_id, completed=False))
         checkpoint=provider.prepare_close_interruption(self.tab)
         provider.validate_close_interruption(self.tab,checkpoint)
         with self.assertRaises(Uncertain):provider.confirm_close_interruption(self.tab,checkpoint)
         provider.processes.all.return_value={}
         self.assertEqual(provider.confirm_close_interruption(self.tab,checkpoint)['outcome'],'interrupted')
-        provider.pending_request.return_value=None
-        self.assertEqual(provider.confirm_close_interruption(self.tab,checkpoint)['outcome'],'not_interrupted')
+        provider.request_state.return_value=dict(request_id=request_id, completed=True)
+        self.assertEqual(provider.confirm_close_interruption(self.tab,checkpoint)['outcome'],'unconfirmed')
 
     def test_codex_archive_never_changes_a_still_running_thread(self):
         rpc=Mock();provider=Codex(Mock(),rpc)

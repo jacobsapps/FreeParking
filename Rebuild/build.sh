@@ -31,10 +31,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleDisplayName</key><string>$NAME</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.2</string>
-<key>CFBundleVersion</key><string>2026101402</string>
+<key>CFBundleShortVersionString</key><string>0.4.3</string>
+<key>CFBundleVersion</key><string>2026101504</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSAppleEventsUsageDescription</key><string>Save and restore your iTerm windows when you choose Park my windows.</string>
+<key>NSDocumentsFolderUsageDescription</key><string>Access your saved session folders in Documents to reopen Claude and Codex in the same place.</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST

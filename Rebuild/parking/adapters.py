@@ -3,7 +3,7 @@ from pathlib import Path
 import json
 import os
 import subprocess
-from .model import ParkingError, Uncertain
+from .model import ParkingError, Uncertain, NotSubmitted
 
 
 def run(argv, timeout=15):
@@ -35,6 +35,8 @@ class ITerm:
             raise ParkingError('iTerm returned an unreadable inventory—not an empty desktop.')
         if action != 'list' and not isinstance(result, dict):
             raise Uncertain('iTerm returned an unreadable operation receipt.')
+        if action != 'list' and isinstance(result.get('notSubmitted'), str):
+            raise NotSubmitted(result['notSubmitted'])
         return result
 
     def windows(self):
@@ -93,12 +95,15 @@ class Processes:
         return ' '.join(self.runner(['/usr/bin/env', 'TZ=UTC', '/bin/ps', '-p', str(pid), '-o', 'lstart=']).split())
 
     def send_signal(self, saved, number):
-        import signal
-        if number not in (signal.SIGINT, signal.SIGTERM):
-            raise ParkingError('Unsupported agent signal.')
-        current = self.all().get(saved['pid'])
-        if not current or current['started'] != saved['started'] or current['tty'] != saved['tty']:
-            raise ParkingError('Agent process identity changed; no signal sent.')
-        if '/app-server-daemon/' in current['executable']:
-            raise ParkingError('Never signal the shared Codex server.')
-        os.kill(saved['pid'], number)
+        try:
+            import signal
+            if number not in (signal.SIGINT, signal.SIGTERM):
+                raise ParkingError('Unsupported agent signal.')
+            current = self.all().get(saved['pid'])
+            if not current or current['started'] != saved['started'] or current['tty'] != saved['tty']:
+                raise ParkingError('Agent process identity changed; no signal sent.')
+            if '/app-server-daemon/' in current['executable']:
+                raise ParkingError('Never signal the shared Codex server.')
+            os.kill(saved['pid'], number)
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error

@@ -30,10 +30,16 @@ class Gate:
             tab = source.tabs[intent['index']]
             if session_id is not None and (session_id != tab.session_id or turn_id != tab.turn_id):
                 raise ParkingError('Interruption permit belongs to another conversation/turn.')
-            if not Verifier.source_open(record, self.observer.observe()):
+            snapshot = self.observer.observe()
+            if not Verifier.source_open(record, snapshot):
                 raise ParkingError('Window/session changed before interruption. Nothing stopped.')
+            if Verifier.other_conversation_tabs(tab, snapshot, {tab.terminal_id}):
+                raise ParkingError('This conversation opened elsewhere before interruption. Nothing stopped.')
             return tab
-        tab = authorize()
+        try:
+            tab = authorize()
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         return self.providers.get(tab.provider).interrupt(tab, authorize=authorize)
 
     def stop_closed_client(self, receipt):
@@ -47,7 +53,10 @@ class Gate:
             guard = getattr(self.terminal,'authorize_provider',None)
             if guard: guard(source)
             return source.tabs[intent['index']]
-        tab=authorize()
+        try:
+            tab = authorize()
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         self.providers.get(tab.provider).finish_close(tab,authorize)
 
     def native_archive(self, receipt):
@@ -60,7 +69,7 @@ class Gate:
             if tab.session_id != sid or tab.provider != 'codex':
                 raise ParkingError('Native archive permit belongs to another conversation.')
             expected = Phase.CLOSING.value if intent['archived'] else Phase.CHECKING.value
-            snapshot = self.observer.observe()
+            snapshot = self.settle(lambda observed: (Verifier.other_conversation_tabs(tab, observed), True)[1])
             if Verifier.other_conversation_tabs(tab, snapshot):
                 raise ParkingError('This conversation is already open elsewhere. Its native runtime was left alone.')
             if record['phase'] != expected or not Verifier.source_absent(record,snapshot):
@@ -68,12 +77,23 @@ class Gate:
             provider_guard = getattr(self.terminal, 'authorize_provider', None)
             if provider_guard: provider_guard(source)
             return tab, intent['archived']
-        record = self.record(receipt)
-        source = Window.decode(record['source']);tab = source.tabs[record['intent']['index']]
-        tab, archived = authorize(tab.session_id)
+        try:
+            record = self.record(receipt)
+            source = Window.decode(record['source']);tab = source.tabs[record['intent']['index']]
+            tab, archived = authorize(tab.session_id)
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
         return self.providers.get(tab.provider).set_archived(tab, archived, authorize)
 
     def close(self, receipt):
+        try:
+            source = self.prepare_close(receipt)
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
+        return self.terminal.call('close', windowId=source.window_id,
+                                  sessionIds=[t.terminal_id for t in source.tabs])
+
+    def prepare_close(self, receipt):
         record = self.record(receipt)
         if record['phase'] != Phase.CLOSING.value or record['intent'] != {'kind': 'close'}:
             raise ParkingError('Closing requires a durable close intent.')
@@ -83,22 +103,23 @@ class Gate:
         source = Window.decode(record['source'])
         live = snapshot.window(source.window_id)
         for index, tab in enumerate(live.tabs):
-            if tab.provider == 'shell': continue
+            if Verifier.other_conversation_tabs(tab, snapshot, {tab.terminal_id}):
+                raise ParkingError('This conversation opened elsewhere before close. Nothing closed.')
+            # Claude's normal terminal close is authorized by the exact saved
+            # session, not by optional unfinished-request/continuation metadata.
+            # Codex still needs its shared-server turn stopped before archiving.
+            if tab.provider != 'codex': continue
             if tab.activity == 'unknown':
                 raise ParkingError('Agent activity is unknown. Nothing closed.')
             if tab.activity == 'running':
-                checkpoint = record.get('close_interruptions', {}).get(str(index))
-                if not checkpoint:
-                    raise ParkingError('An agent started working before close. Nothing closed; refresh and park again.')
-                self.providers.get(tab.provider).validate_close_interruption(tab, checkpoint)
-        return self.terminal.call('close', windowId=source.window_id,
-                                  sessionIds=[t.terminal_id for t in source.tabs])
+                raise ParkingError('An agent started working before close. Nothing closed; refresh and park again.')
+        return source
 
     def create(self, receipt):
         try:
             request = self.prepare_create(receipt)
             self.record(receipt)  # Recheck durability after the settling wait.
-        except ParkingError as error:
+        except Exception as error:
             raise NotSubmitted(str(error)) from error
         # Exceptions beyond this boundary remain uncertain, never auto-replayed.
         return self.terminal.call('create', **request)
@@ -134,5 +155,12 @@ class Gate:
             raise ParkingError('This conversation was already reopened elsewhere. No duplicate or continuation was launched.')
         provider = self.providers.get(tab.provider)
         prompt = intent.get('continue_message')
+        current = getattr(provider, 'interruption_current', None)
+        if prompt is not None and current:
+            try: eligible = current(tab, record.get('interruptions', {}).get(str(intent['index'])))
+            except Exception: eligible = False
+            # Durable intent grants permission for at most one optional message;
+            # it does not require sending it when its evidence becomes uncertain.
+            if not eligible: prompt = None
         command = provider.launch(tab, intent['receipt'], prompt=prompt) if prompt is not None else provider.launch(tab, intent['receipt'])
         return dict(windowId=wid, sessionIds=ids, command=command)
