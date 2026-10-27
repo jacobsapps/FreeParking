@@ -40,6 +40,14 @@ def compose(root=DEFAULT_ROOT, scope_path=None, test_close_response=None, live=F
         processes = ScopedProcesses(scope, outer, processes)
         terminal = FixtureTerminal(scope, outer)
     store = Store(root)
+    if live and not scope_path:
+        from .native_terminal import NativeITerm
+        from .native_processes import KernelProcesses
+        records = store.readable()[0]
+        legacy = any(r['phase'] != 'returned' and (
+            (r['phase'] in ('saved','closing','interrupting') and r['source']['window_id'].isdigit()) or
+            any(t['window_id'].isdigit() for t in r['targets'].values())) for r in records)
+        terminal, processes = NativeITerm(legacy=legacy), KernelProcesses()
     providers = Providers(Shell(processes), Claude(processes), Codex(processes, CodexRPC()))
     observer = Observer(terminal, processes, providers)
     gate = Gate(store, observer, terminal, providers, mutations_enabled=bool(scope_path) or live, settle=observer.verify_until)

@@ -1,6 +1,7 @@
-The optional tab-layout companion (parking/layout_api.py) is a separate
-GPL-2.0-or-later program communicating with the application using JSON.
-It uses the official iTerm2 Python API, version 2.7 (GPLv2), protobuf 3.20.3
+The persistent terminal companion (parking/terminal_api.py) and optional
+legacy tab-layout companion (parking/layout_api.py) are separate
+GPL-2.0-or-later programs communicating with the application using JSON.
+They use the official iTerm2 Python API, version 2.7 (GPLv2), protobuf 3.20.3
 (BSD-3-Clause), and websockets 10.4 (BSD-3-Clause).
 
 Pinned package sources: https://pypi.org/project/iterm2/2.7/
@@ -8,6 +9,8 @@ https://pypi.org/project/protobuf/3.20.3/
 https://pypi.org/project/websockets/10.4/
 
 The build retains each distribution's license and metadata in the vendor
-directory. The companion's complete source is included in the app bundle.
-The companion only changes the order of an exact existing set of tabs using
-iTerm's public API; ordinary parking and opening use macOS Automation.
+directory. Both companions' complete sources are included in the app bundle.
+The persistent companion reads windows and creates, closes, or reorders exact
+targets through iTerm's public API after authorization by the recovery worker.
+The legacy layout companion only reorders an exact existing set of tabs.
+The read-only native inspection library and its C source are also bundled.

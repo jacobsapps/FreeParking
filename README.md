@@ -31,11 +31,13 @@ iTerm is required. Process inspection failures are reported, not treated as an
 empty desktop. No accessibility or screen-capture permission is required by the
 application.
 
-The build installs pinned dependencies for a separate tab-layout companion.
-Recovering a missing middle tab uses iTerm's Python API to put surviving and
-replacement tabs back in their saved order. Enable that API in iTerm Settings
-if you need layout repair. Ordinary parking and reopening use Automation.
-Dependency licenses and the companion source are included in the bundle.
+Enable **Python API** in **iTerm Settings → General → Magic**. A separate
+companion keeps one API connection for each recovery operation, including
+inventory, opening, closing and tab ordering. The build installs its pinned
+dependencies and compiles a small read-only macOS process-inspection library.
+Dependency licenses and companion/library sources are included in the bundle.
+Automation is used for initial API authentication and compatibility with older
+incomplete saves, rather than launching AppleScript for each scan or tab.
 
 ## Use
 
@@ -98,8 +100,10 @@ Free Parking records private timing traces for every helper operation. Choose
 from the checkout to summarize the latest trace. Logs omit command arguments,
 terminal contents and conversation text. They are bounded and stay on your Mac.
 
-The 0.5.1 update batches process inspection, streams cars and tab progress while
-operations run, and shows all saved windows in a scrolling grid. See
+The 0.5.2 update reads processes directly through macOS APIs and keeps an iTerm
+API connection open throughout each operation. It removes per-scan `ps`, `lsof`
+and AppleScript processes. Cars and tab progress stream while operations run,
+and all saved windows appear in a scrolling grid. See
 `Rebuild/PERFORMANCE-2026-10-27.txt` for measured before/after results and remaining
 latency; a seven-tab verified restore still takes noticeably longer than merely
 submitting a launch command.

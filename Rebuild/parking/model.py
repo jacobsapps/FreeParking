@@ -1,5 +1,5 @@
 """Explicit identities and states. Display text is never an identity input."""
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, replace
 from enum import Enum
 from pathlib import Path
 import hashlib
@@ -148,7 +148,11 @@ class Observation:
         return {s['id'] for w in self.raw for t in w['tabs'] for s in t['sessions']}
 
     def raw_window(self, wid):
-        return next((w for w in self.raw if w['id'] == wid), None)
+        return next((w for w in self.raw if w['id'] == wid or wid in w.get('aliases', [])), None)
 
     def window(self, wid):
-        return next((w for w in self.windows if w.window_id == wid), None)
+        direct = next((w for w in self.windows if w.window_id == wid), None)
+        if direct is not None: return direct
+        raw = self.raw_window(wid)
+        window = next((w for w in self.windows if raw and w.window_id == raw['id']), None)
+        return replace(window, window_id=wid) if window is not None else None

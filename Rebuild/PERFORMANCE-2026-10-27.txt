@@ -1,4 +1,60 @@
-FREE PARKING 0.5.1 — LATENCY INVESTIGATION
+FREE PARKING 0.5.2 — DIRECT NATIVE INSPECTION
+2026-10-27, build 2026102706
+
+The installed production build now reads process identities, arguments, working
+folders, open files and listening sockets directly through libproc/sysctl. A
+small read-only C library is built with the macOS SDK and bundled with source.
+No ps or lsof processes are started for these reads. Inaccessible processes are
+retained or reported as errors; fresh PID/TTY/endpoint revalidation still runs.
+
+One standalone iTerm API companion keeps a connection throughout each operation.
+Inventory requests run concurrently inside a read transaction. Exact-target
+closing and reordering use transactions; asynchronous window creation releases
+the transaction first, to avoid deadlocking iTerm's window setup. Creation
+receipts are captured before presentation updates, and lost replies are never
+replayed. Window creation is addressed by the checked UUID, not frontmost focus.
+The private companion is stopped after the operation instead of waiting for the
+SDK's websocket shutdown timeout. This does not terminate iTerm or an agent.
+
+The Python API must be enabled in iTerm Settings > General > Magic. Initial API
+authentication still uses the SDK's Automation handshake. A single compatibility
+inventory maps incomplete older saves' numeric IDs to exact native session groups.
+Legacy coordinates are converted using the main screen's height. Existing saved
+permissions, durable intents, receipt verification and all-window scope remain.
+The Swift app still has one recovery worker per operation; executable preflight
+uses the login shell. This removes repeated inspection subprocesses, not every
+process boundary in the application.
+
+Measured on the user's desktop
+------------------------------
+- All 3 windows / 12 tabs: about 0.07 seconds per warm full identity scan; the
+  first scan including API connection setup took 0.37 seconds. All 12 resolved.
+- Installed app helper, 2 tabs: 6.60 seconds park / 2.32 seconds fully restored,
+  compared with 9.23 / 5.56 seconds in 0.5.1. Graceful agent exit dominates park.
+- Installed app helper, 7 historical Backtrace tabs: 6.96 seconds park / 11.62
+  seconds fully restored, compared with 14.26 / 15.26 seconds in 0.5.1.
+  First tab creation was acknowledged at 0.67 seconds, last at 10.22 seconds.
+  Every exact conversation, original order and streamed count 0 through 7 was
+  verified; other working windows and their terminal IDs were unchanged.
+- An earlier seven-tab run took 8.75 / 11.11 seconds including the subsequently
+  removed two-second shutdown wait. Startup variability means that subtracting
+  two seconds from that measurement is not a measured final restore result.
+- An isolated native create took 0.16 seconds; exact native close took 0.02.
+- 341 backend tests, 171 outer/legacy tests, Swift UI/bridge contracts and JXA
+  boundary tests passed. New tests cover real kernel reads against an owned
+  child, stale endpoints, exact native targets, legacy IDs, missing receipts,
+  presentation failures, and creation outside the iTerm transaction.
+
+The remaining restore delay is real: each agent must start before the next
+append passes the existing conversation-identity guards. The final seven-tab
+trace spent 10.30 seconds inside settling checks, including 6.62 seconds of
+polling waits. Removing process-spawn overhead alone does not make that startup
+sequence instantaneous. These are individual runs, not latency guarantees.
+
+The installed app is /Applications/Free Parking.app, version 0.5.2. Raw timings,
+session identities and acceptance outputs remain private and untracked.
+
+PREVIOUS 0.5.1 LATENCY INVESTIGATION (historical)
 2026-10-27, build 2026102705
 
 Measured causes
