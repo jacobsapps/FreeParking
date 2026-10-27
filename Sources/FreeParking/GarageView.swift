@@ -40,7 +40,7 @@ struct GarageView: View {
                 } else {
                     HStack(alignment: .top, spacing: 14) {
                         NewParkingBay().frame(width: 138)
-                        ForEach(visibleCars) { ParkedBay(car: $0).frame(maxWidth: 177) }
+                        ForEach(visibleCars) { ParkedBay(car: $0).frame(maxWidth: 220) }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
                 }
@@ -101,7 +101,10 @@ struct GarageView: View {
         HStack(spacing: 7) {
             if garage.busy {
                 ProgressView().controlSize(.small)
-                Text(garage.activity).lineLimit(2)
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    Text(garage.activity + (garage.operationStartedAt.map { " · \(max(0, Int(context.date.timeIntervalSince($0))))s" } ?? ""))
+                        .lineLimit(2)
+                }
             } else if garage.problem != nil {
                 Image(systemName: "exclamationmark.triangle").foregroundStyle(ParkingStyle.warning)
                 Text(garage.problem ?? "").lineLimit(2).foregroundStyle(ParkingStyle.warning)
@@ -197,12 +200,32 @@ private struct ParkedBay: View {
             .onKeyPress(.return) { garage.open(car); return .handled }
             .onKeyPress(.space) { garage.open(car); return .handled }
 
-            Text(car.displayTitle).font(.system(size: 11, weight: .medium))
-                .lineLimit(1).help(car.tabNamesHelp)
+            Button { garage.selectedCar = car } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(car.tabs.prefix(8))) { tab in
+                        Text("\(tab.index + 1). \(tab.displayTitle)").font(.system(size: 11, weight: .medium)).lineLimit(1)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    if car.tabs.count > 8 { Text("+ \(car.tabs.count - 8) more saved tabs").font(.system(size: 11)) }
+                    Text("Tab details and permissions")
+                        .font(.system(size: 10)).underline().foregroundStyle(ParkingStyle.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain).help(car.tabNamesHelp)
+            .accessibilityIdentifier("show-tabs-car-" + car.id)
+            if let progress = car.partialRestoreLabel {
+                Text(progress).font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(ParkingStyle.warning)
+                if !working && !car.isChecking {
+                    Button("Open remaining \(car.tabs.count - car.openedTabCount) tabs") { garage.open(car) }
+                        .buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
+                }
+            }
             if car.canFinishParking, !working {
                 Button("Finish parking") { garage.open(car) }
                     .buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
-                    .help("The window has closed. Complete its saved-session preparation without reopening any tabs.")
+                    .help("Complete parking this saved window without reopening any tabs.")
             }
             if car.isChecking, !working {
                 Button { garage.open(car) } label: {
@@ -236,7 +259,7 @@ private struct ParkedBay: View {
             }
         }
         .contextMenu {
-            Button(car.canFinishParking ? "Finish parking" : car.isChecking ? "Check status" : "Open in iTerm") { garage.open(car) }.disabled(garage.busy)
+            Button(car.actionLabel) { garage.open(car) }.disabled(garage.busy)
             Button("Show tabs") { garage.selectedCar = car }
             Button("Recovery…") { garage.recoveryCar = car }
             Divider()
@@ -253,7 +276,7 @@ struct CarActions: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            action("Open in iTerm", icon: "arrow.up.forward") { garage.open(car) }
+            action(car.actionLabel, icon: "arrow.up.forward") { garage.open(car) }
                 .disabled(garage.busy)
             Divider().overlay(ParkingStyle.secondary.opacity(0.2)).padding(.vertical, 4)
             action("Show tabs", icon: "list.bullet") { garage.selectedCar = car }
@@ -352,7 +375,12 @@ struct ArchiveView: View {
                             .font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
                     }
                     Spacer(minLength: 8)
-                    Button("Bring back car") { garage.bringBack(car) }
+                    Button(car.returnVerified == true ? "View saved tabs" : "Bring back car") {
+                        if car.returnVerified == true {
+                            garage.showingArchive = false
+                            garage.selectedCar = car
+                        } else { garage.bringBack(car) }
+                    }
                         .buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
                         .accessibilityIdentifier("unarchive-car-" + car.id)
                 }
@@ -435,6 +463,8 @@ private struct ContinuationSettings: View {
             Toggle("Automatically continue tasks Free Parking stopped", isOn: $value.autoContinueInterrupted)
             TextField("Continuation message", text: $value.continueMessage).textFieldStyle(.roundedBorder)
             Text("Sent once on reopening only when a running task was confirmed interrupted. Idle sessions are left alone.")
+                .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
+            Text("Permissions are saved per tab when the agent reports them. Otherwise Codex reopens read-only and Claude in plan mode. Free Parking never gives every window full access.")
                 .font(.system(size: 12)).foregroundStyle(ParkingStyle.secondary)
             HStack {
                 Spacer()

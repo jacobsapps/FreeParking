@@ -13,8 +13,8 @@ only and is not bundled in the app.
 
 Requires macOS 14+, iTerm2, Xcode Command Line Tools, `/usr/bin/python3`, and
 signed-in Claude/Codex CLIs in the login shell. Current live evidence is from
-macOS 27.0.1, iTerm2 3.7.3, Claude Code 2.1.296, Codex CLI 0.160.1 and its native
-shared daemon 0.162.0. Other versions may expose different native identity data;
+macOS 27.0.1, iTerm2 3.7.3, Claude Code 2.1.282 and Codex CLI/shared daemon 0.164.0.
+Other versions may expose different native identity data;
 unsupported or ambiguous identities are refused, not guessed.
 
 ```sh
@@ -31,19 +31,33 @@ iTerm is required. Process inspection failures are reported, not treated as an
 empty desktop. No accessibility or screen-capture permission is required by the
 application.
 
+The build installs pinned dependencies for a separate tab-layout companion.
+Recovering a missing middle tab uses iTerm's Python API to put surviving and
+replacement tabs back in their saved order. Enable that API in iTerm Settings
+if you need layout repair. Ordinary parking and reopening use Automation.
+Dependency licenses and the companion source are included in the bundle.
+
 ## Use
 
 1. Click **Park my windows**. Every window's recovery is saved and verified before
-   the first interruption or close. Normal iTerm close confirmations remain on.
+   the first interruption or close. The app respects your iTerm close settings.
    An unresolved tab blocks the batch before anything closes.
 2. **Review windows** lists every window and its tab names, including exact
    identification problems. You can also park one identified window there.
 3. Click a parked car to reopen it. Exact conversation IDs, folders, grouping and
    tab order are verified. Confirmed returns leave the parking lot; recovery stays
-   in the archive. Hover over a car to see its saved tab names.
+   in the archive. Up to eight saved titles are visible on each car; **Tab details
+   and permissions** shows the complete list and each tab's restore state.
+   Partial returns show the exact opened count and **Open remaining tabs**.
 4. The **settings gear** controls whether a task that Free Parking actually
    interrupted receives `please continue` on reopening; the message is editable.
-   Idle tasks receive no message. Native agent permissions are not escalated.
+   Idle tasks receive no message. Verified per-tab permission settings are kept.
+   When the original mode is unavailable, Codex explicitly opens read-only with
+   approval on request; Claude opens in plan mode. Global YOLO defaults are not inherited.
+
+The release app always operates on the complete iTerm desktop. It has no agent
+window exclusion and cannot launch with a disposable test scope. A durable batch
+journal and per-window progress distinguish completed, pending and untouched saves.
 
 Titles are display-only, never identity. Codex subagents sharing a parent's
 terminal endpoint are associated through explicit native parent relationships;
@@ -70,10 +84,12 @@ not guaranteed message delivery after every crash.
 
 The new journal is private local SQLite under
 `~/Library/Application Support/Free Parking/Recovery-v2/`.
-Legacy recovery under `~/Library/Application Support/Car Park/` is **unchanged**;
-**Garage → Show Previous Recovery Files** opens that folder. Legacy cars are not silently imported or
-resolved by title. The backed-up previous app can still access them. Keep these
-backups if old parked sessions remain.
+Legacy recovery under `~/Library/Application Support/Car Park/` is **unchanged**.
+Complete parked v1 saves with exact session IDs are copied into the new journal
+once; saved shell commands and old permission-bypass flags are never executed.
+An unfinished legacy launch is reported for review and retained, never replayed
+by guessing. **Garage → Show Previous Recovery Files** opens the originals.
+One unreadable record is reported separately and does not hide intact recoveries.
 
 ## Verification
 
@@ -85,6 +101,12 @@ python3 Rebuild/verify.py --suite all --build
 The component suites cover the real recovery store, exact identity contracts,
 reconciliation, continuation, replay rejection and the independent test guard.
 Fake OS tests are not desktop acceptance evidence.
+
+The October 27 repair includes native seven-tab mixed-agent restoration, recovery
+after a middle returned tab closes, seven historical conversations selected from
+Backtrace's index, and busy Claude/Codex interruption with exactly one continuation
+per interrupted conversation. See `Rebuild/REPAIR-2026-10-27.txt` for the evidence
+and the whole-desktop acceptance result.
 
 For explicitly authorized live verification, the test-only lab creates **new**
 Claude/Codex conversations in random folders and independently protects every

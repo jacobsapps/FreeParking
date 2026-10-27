@@ -6,6 +6,15 @@ import shlex
 import time
 import uuid
 from .model import ParkingError, Process, Tab, Uncertain, NotSubmitted
+from .permissions import launch_flags, CLAUDE_MODES
+
+
+def preflight_executable(executable):
+    from .adapters import run
+    # The same login-shell PATH used by the actual new terminal command.
+    path = run(['/bin/zsh', '-lc', 'command -v -- '+shlex.quote(executable)]).strip().splitlines()
+    if not path or not Path(path[-1]).is_file():
+        raise ParkingError('Cannot find '+executable+' in your login shell. Nothing closed.')
 
 
 def command(tab, receipt, argv, prompt=None):
@@ -60,11 +69,14 @@ class Claude:
     def __init__(self, processes, root=None, executable=None):
         self.processes = processes
         self.root = Path(root) if root else Path.home()/'.claude'
-        self.executable = str(executable or Path.home()/'.local/bin/claude')
+        # Resolve in the user's login shell, as Codex does. Claude supports
+        # native, Homebrew and npm installs; ~/.local/bin is not universal.
+        self.executable = str(executable or 'claude')
 
     def registry(self, process):
         try: record = json.loads((self.root/'sessions'/(str(process.pid)+'.json')).read_text())
-        except (OSError, ValueError) as error: raise ParkingError('Claude’s native process registry is unavailable.') from error
+        except (OSError, ValueError) as error:
+            raise ParkingError('Claude has not published its session identity yet. Finish any startup, sign-in or folder-access prompt in this tab, then refresh.') from error
         if (record.get('pid') != process.pid or record.get('pidDomain') != 'darwin'
                 or record.get('kind') != 'interactive' or record.get('entrypoint') != 'cli'
                 or ' '.join(record.get('procStart','').split()) != self.processes.started_utc(process.pid)):
@@ -90,7 +102,10 @@ class Claude:
         record = self.registry(process)
         self.saved(record['sessionId'],record['cwd'])
         state = {'busy':'running','idle':'idle','waiting':'waiting'}.get(record.get('status'),'unknown')
-        return Tab(session['id'],session['tty'],session.get('title',''),self.name,record['sessionId'],record['cwd'],process,state)
+        mode = record.get('permissionMode')
+        permissions = dict(mode=mode) if isinstance(mode, str) and mode in CLAUDE_MODES else {}
+        return Tab(session['id'],session['tty'],session.get('title',''),self.name,record['sessionId'],record['cwd'],process,state,
+                   permissions=permissions)
 
     def client_closed(self, tab): return client_closed(tab, self.processes)
 
@@ -99,7 +114,9 @@ class Claude:
     def launch(self, tab, receipt, prompt=None):
         if tab.provider != self.name: raise ParkingError('Provider changed.')
         self.saved(tab.session_id,tab.cwd)
-        return command(tab,receipt,[self.executable,'--resume',tab.session_id],prompt)
+        return command(tab,receipt,[self.executable,*launch_flags(tab),'--resume',tab.session_id],prompt)
+
+    def preflight(self, tab): preflight_executable(self.executable)
 
     def activity(self, tab):
         record = self.registry(tab.process)
@@ -352,7 +369,9 @@ class Codex:
         thread=self.rpc.read(tab.session_id)
         if tab.provider!=self.name or thread['id']!=tab.session_id or thread['cwd']!=tab.cwd:
             raise ParkingError('The exact Codex thread and folder could not be verified.')
-        return command(tab,receipt,[self.executable,'resume',tab.session_id],prompt)
+        return command(tab,receipt,[self.executable,*launch_flags(tab),'resume',tab.session_id],prompt)
+
+    def preflight(self, tab): preflight_executable(self.executable)
 
     def interrupt(self,tab,authorize=None):
         try:

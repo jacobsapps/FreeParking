@@ -3,8 +3,13 @@
 function run(argv) {
     const request = JSON.parse(argv[0]);
     const app = Application('com.googlecode.iterm2');
-    const windows = () => app.running() ? app.windows().filter(w => w.tabs() !== null) : [];
-    const sessions = w => w.tabs().flatMap(t => t.sessions());
+    // Enumeration proxies may be indexed by front-to-back position. Rebind
+    // every window to its immutable native ID before reading or mutating it.
+    const windows = () => app.running() ? app.windows.id().map(id => app.windows.byId(id)).filter(w => w.tabs() !== null) : [];
+    // Collection reads are single AppleEvents. Reading every session property
+    // individually was multiplying both latency and opportunities for churn.
+    const layout = w => w.tabs.sessions.id();
+    const topology = raw => raw.map(w => [w.id, w.tabs.map(t => t.sessions.map(s => s.id))]).sort((a,b) => a[0].localeCompare(b[0]));
     function variable(s, name) {
         try { return s.variable({named:name}) || ''; } catch (_) { return ''; }
     }
@@ -12,23 +17,44 @@ function run(argv) {
         try { const value = t.title(); if (value) return value; } catch (_) {}
         return s.name();
     }
+    function inventory(w) {
+        const ids = layout(w);
+        const ttys = w.tabs.sessions.tty();
+        const names = w.tabs.sessions.name();
+        let titles;
+        try { titles = w.tabs.title(); } catch (_) { titles = []; }
+        let bounds = {};
+        try { bounds = w.bounds(); } catch (_) {}
+        return {id:String(w.id()), bounds:bounds, tabs:w.tabs().map((t,i) => ({
+            sessions:t.sessions().map((s,j) => ({id:ids[i][j], tty:ttys[i][j],
+                title:titles[i] || names[i][j], name:variable(s,'autoName'), receipt:variable(s,'user.freeParkingReceipt')}))
+        }))};
+    }
     function exact() {
-        const w = windows().find(w => String(w.id()) === request.windowId);
-        if (!w || w.tabs().some(t => t.sessions().length !== 1) ||
-            JSON.stringify(sessions(w).map(s => s.id())) !== JSON.stringify(request.sessionIds)) {
-            throw new Error('The exact target changed. No window operation was performed.');
+        const w = app.windows.byId(Number(request.windowId));
+        const groups = layout(w);
+        if (String(w.id()) !== request.windowId || groups.some(g => g.length !== 1) ||
+            JSON.stringify(groups.flat()) !== JSON.stringify(request.sessionIds)) {
+            const error = new Error('The exact target changed. No window operation was performed.');
+            error.details = {expectedWindowId:request.windowId, expectedSessionIds:request.sessionIds,
+                observedWindowId:String(w.id()), observedSessionGroups:groups};
+            throw error;
         }
         return w;
     }
     if (request.action === 'list') {
-        return JSON.stringify(windows().map(w => ({id:String(w.id()), tabs:w.tabs().map(t => ({
-            sessions:t.sessions().map(s => ({id:s.id(), tty:s.tty(), title:title(t,s),
-                receipt:variable(s,'user.freeParkingReceipt')}))
-        }))})));
+        const before = windows().map(w => ({id:String(w.id()), tabs:layout(w).map(ids => ({sessions:ids.map(id => ({id}))}))}));
+        const raw = windows().map(inventory);
+        const after = windows().map(w => ({id:String(w.id()), tabs:layout(w).map(ids => ({sessions:ids.map(id => ({id}))}))}));
+        const expected = JSON.stringify(topology(raw));
+        if (JSON.stringify(topology(before)) !== expected || JSON.stringify(topology(after)) !== expected) {
+            throw new Error('FP_READ_RACE: iTerm tabs changed during inspection. Read a fresh inventory.');
+        }
+        return JSON.stringify(raw);
     }
     if (request.action === 'close') {
         let w;
-        try { w = exact(); } catch (error) { return JSON.stringify({notSubmitted:String(error)}); }
+        try { w = exact(); } catch (error) { return JSON.stringify({notSubmitted:String(error), details:error.details || null}); }
         w.close(); // Normal confirmation. Never force or approve it ourselves.
         return JSON.stringify({acknowledged:true});
     }
@@ -37,14 +63,28 @@ function run(argv) {
         try {
             if (typeof request.command !== 'string' || !request.command) throw new Error('Missing launch specification.');
             if (request.windowId !== null) w = exact();
-        } catch (error) { return JSON.stringify({notSubmitted:String(error)}); }
+        } catch (error) { return JSON.stringify({notSubmitted:String(error), details:error.details || null}); }
         if (request.windowId !== null) {
             t = w.createTabWithDefaultProfile({command:request.command});
         } else {
             w = app.createWindowWithDefaultProfile({command:request.command});
             t = w.currentTab();
         }
-        return JSON.stringify({windowId:String(w.id()),sessionId:t.currentSession().id()});
+        // Capture identity before any presentation write. A failed title or
+        // geometry update must never turn a successful launch into a retry.
+        const result = {windowId:String(w.id()),sessionId:t.currentSession().id(),presentationWarnings:[]};
+        try {
+            if (request.title) {
+                try { t.title = request.title; }
+                catch (_) { t.currentSession().name = request.name || request.title; }
+            }
+        }
+        catch (error) { result.presentationWarnings.push('Tab title: '+String(error)); }
+        try {
+            const b = request.bounds;
+            if (b && ['x','y','width','height'].every(k => typeof b[k] === 'number') && b.width > 0 && b.height > 0) w.bounds = b;
+        } catch (error) { result.presentationWarnings.push('Window position: '+String(error)); }
+        return JSON.stringify(result);
     }
     throw new Error('Unknown operation.');
 }

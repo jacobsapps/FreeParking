@@ -4,6 +4,7 @@ Shell, Claude and Codex adapters share exact identity and launch contracts.
 There is deliberately no title-matching fallback or pretend-success implementation.
 """
 import base64
+from dataclasses import replace
 from pathlib import Path
 import shlex
 import uuid
@@ -85,7 +86,11 @@ class Providers:
         agents = self.candidates(session, processes)
         if len(agents) > 1: raise ParkingError('Multiple agent providers share this terminal.')
         name = next(iter(agents), 'shell')
-        return self.get(name).identify(session, processes)
+        tab = self.get(name).identify(session, processes)
+        # Keep the unformatted name separately from the visible title. iTerm
+        # may append a job suffix; feeding that rendered title back as a name
+        # would append the suffix again on every park/restore cycle.
+        return replace(tab, terminal_name=session.get("name", ""))
 
     def get(self, name):
         if name not in self.items:

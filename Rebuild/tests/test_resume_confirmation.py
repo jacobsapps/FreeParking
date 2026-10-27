@@ -44,6 +44,12 @@ class ResumeConfirmationTests(unittest.TestCase):
             self.processes.command.return_value=argv
             self.assertIsNone(resume_candidate(self.process,self.session,self.processes,self.rpc))
 
+    def test_explicit_permission_flags_still_require_exact_resume_confirmation(self):
+        self.processes.command.return_value='/bin/codex --sandbox read-only --ask-for-approval on-request resume '+self.sid
+        candidate = resume_candidate(self.process,self.session,self.processes,self.rpc)
+        self.assertEqual(candidate['session_id'], self.sid)
+        with self.assertRaises(ConfirmationRequired): self.provider.identify(self.session,self.process_map)
+
     def test_native_folder_id_and_root_must_match(self):
         for changes in (dict(id=str(uuid.uuid4())),dict(cwd='/other'),dict(source={'subAgent':{}}),dict(status={'type':'notLoaded'})):
             self.rpc.call.return_value=dict(thread={**self.thread,**changes})

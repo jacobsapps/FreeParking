@@ -42,7 +42,10 @@ class Cleanup:
         for w in raw:
             ids = session_ids(w)
             ttys = {s['tty'] for t in w['tabs'] for s in t['sessions']}
-            matches = [r for r in receipts.get(w['id'], []) if r['ids'] == ids]
+            # Cleanup owns every surviving tab through its original create
+            # receipt. Closed tabs and an authorized reorder do not revoke
+            # ownership. The native close still checks the exact CURRENT order.
+            matches = [r for r in receipts.get(w['id'], []) if ids and len(ids)==len(set(ids)) and set(ids)<=set(r['ids'])]
             if matches and not ttys.intersection(protected_ttys) and all(len(t['sessions']) == 1 for t in w['tabs']):
                 targets[w['id']] = dict(ids=ids, receipts=matches,
                     processes=[dict(p) for p in ps.values() if p['tty'] in ttys], state='planned')

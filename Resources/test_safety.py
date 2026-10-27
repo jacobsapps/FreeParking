@@ -133,7 +133,7 @@ class Scope:
 
 
 class ScopedTerminal:
-    ACTIONS = {'create', 'check', 'close', 'focus', 'set-title', 'set-titles', 'set-bounds'}
+    ACTIONS = {'create', 'check', 'close', 'focus', 'set-title', 'set-titles', 'set-bounds', 'reorder'}
 
     def __init__(self, scope, terminal):
         self.scope, self.terminal = scope, terminal
@@ -164,8 +164,10 @@ class ScopedTerminal:
             ids = request.get('sessionIds', [request['sessionId']] if 'sessionId' in request else [])
             if action != 'create' and (not ids or not set(ids).issubset(actual)):
                 raise SafetyError('Test shim refuses an unowned/missing session.')
-            if action in ('close', 'check', 'set-bounds') and ids != actual:
+            if action in ('close', 'check', 'set-bounds', 'reorder') and ids != actual:
                 raise SafetyError('Test target must match the exact remaining tab order.')
+            if action == 'reorder' and sorted(request.get('desiredIds', [])) != sorted(actual):
+                raise SafetyError('Reordering must keep exactly the same owned tabs.')
         if action != 'create':
             return self.terminal.call(action, **kwargs)
         if kwargs.get('command') not in self.scope.data['launch_commands']:

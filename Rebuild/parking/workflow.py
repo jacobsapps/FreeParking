@@ -1,6 +1,7 @@
 """A restartable per-window workflow. No OS calls and no display-dependent logic."""
 import datetime
 import uuid
+import time
 from .model import ParkingError, NotSubmitted, Phase, Uncertain, Window
 from .verifier import Verifier
 from .settings import Settings, continuation_message
@@ -19,6 +20,8 @@ class Workflow:
         record['events'].append(dict(phase=record['phase'], intent=record['intent'],
             issue=str(error), error_type=type(error).__name__,
             at=datetime.datetime.now(datetime.timezone.utc).isoformat()))
+        if isinstance(getattr(error, 'details', None), dict):
+            record['events'][-1]['details'] = error.details
         self.store.save(record)
         return record
 
@@ -37,6 +40,11 @@ class Workflow:
                 raise ParkingError('An earlier operation needs reconciliation before parking again.')
             if any(t.provider == 'codex' and t.activity == 'unknown' for t in window.tabs):
                 raise ParkingError('Cannot confirm agent activity. Nothing interrupted.')
+            for tab in window.tabs:
+                provider = self.gate.providers.get(tab.provider)
+                provider.launch(tab, str(uuid.uuid4()))
+                preflight = getattr(provider, 'preflight', None)
+                if preflight: preflight(tab)
             record['source'] = window.encode()
             # A retry may retain continuation only when the provider re-observes
             # that exact interrupted turn as its latest persisted request.
@@ -171,7 +179,7 @@ class Workflow:
                 if not record.get('close_confirmed'):
                     record['close_confirmed'] = True
                     self.store.save(record)
-        elif record['phase'] in (Phase.OPENING.value, Phase.CHECKING.value, Phase.SAVED.value) and Verifier.returned(record, snapshot):
+        elif record['phase'] in (Phase.OPENING.value, Phase.CHECKING.value) and Verifier.returned(record, snapshot):
             self.store.transition(record, Phase.RETURNED)
         return record
 
@@ -188,6 +196,8 @@ class Workflow:
             record = self.store.load(record_id)
             if record['phase'] == Phase.PARKED.value: return record
             snapshot = self.observer.observe()
+            if record['phase'] == Phase.SAVED.value and not record['intent'] and Verifier.source_absent(record, snapshot):
+                self.store.transition(record, Phase.CLOSING, dict(kind='close'))
             if (record['phase'] != Phase.CLOSING.value or record['intent'] != {'kind':'close'}
                     or not Verifier.source_absent(record, snapshot)):
                 raise ParkingError('Only a confirmed closed window can finish parking. No terminal was changed.')
@@ -204,6 +214,8 @@ class Workflow:
             record = self.store.load(record_id)
             snapshot = self.observer.observe()
             self.reconcile_record(record, snapshot, finish_closing=False)
+            if record['phase'] == Phase.SAVED.value and Verifier.source_open(record, snapshot):
+                return self.note(record, NotSubmitted('The saved original window is still open. Choose Finish parking to close it; no duplicate was opened.'))
             if record['phase'] in (Phase.CLOSING.value, Phase.INTERRUPTING.value) and record['intent']:
                 return record  # A pending close cannot be called returned or reopened.
             if Verifier.returned(record, snapshot):
@@ -223,11 +235,21 @@ class Workflow:
                 return self.note(record, Uncertain('A saved conversation is already open elsewhere. No duplicate or continuation was launched.'))
             for tab in source.tabs:
                 self.gate.providers.get(tab.provider).launch(tab, str(uuid.uuid4()))  # Validate every folder before any create.
-            # A missing middle tab needs explicit rearrangement support. Never
-            # silently append it in the wrong order and claim a verified return.
-            for index, target in record['targets'].items():
-                if target['terminal_id'] not in snapshot.terminal_ids:
-                    return self.note(record, Uncertain('A previously returned tab closed. Recovery is retained; no automatic duplicate/reordering attempted.'))
+            # An explicit retry can recover a closed returned tab. Check a fresh
+            # complete inventory twice and keep its old receipt for diagnosis.
+            missing = {i:t for i,t in record['targets'].items() if t['terminal_id'] not in snapshot.terminal_ids}
+            if missing:
+                snapshot = self.observer.observe()
+                for index, target in missing.items():
+                    if target['terminal_id'] in snapshot.terminal_ids: continue
+                    if Verifier.other_conversation_tabs(source.tabs[int(index)], snapshot, allowed):
+                        return self.note(record, Uncertain('A previously returned conversation is open elsewhere. No duplicate was launched.'))
+                    record.setdefault('closed_targets', []).append(dict(index=int(index), **target))
+                    del record['targets'][index]
+                    # Continuation belongs to the first launch, never a recovery
+                    # of a tab the user subsequently closed.
+                    record.get('interruptions', {}).pop(index, None)
+                self.store.save(record)
             wid = next((t['window_id'] for t in record['targets'].values()), None)
             settings = Settings(self.store.root).read_optional()
             for index, tab in enumerate(source.tabs):
@@ -261,11 +283,23 @@ class Workflow:
                     intent['continue_message'] = message  # Durable before exec; never re-send on retry.
                 receipt = self.store.transition(record, Phase.OPENING, intent)
                 try:
-                    created = self.gate.create(receipt)
+                    for attempt in range(3):
+                        try:
+                            created = self.gate.create(receipt)
+                            break
+                        except NotSubmitted as refused:
+                            if attempt == 2: raise
+                            # A definite pre-submission refusal is safe to retry
+                            # after a fresh observation. Never retry Uncertain.
+                            self.note(record, refused)
+                            receipt = self.store.transition(record, Phase.OPENING, intent)
+                            time.sleep(0.2 * (attempt + 1))
                     wid, sid = created['windowId'], created['sessionId']
                     if not isinstance(wid, str) or not wid or not isinstance(sid, str) or not sid:
                         raise Uncertain('The terminal returned an invalid create receipt.')
                     record['targets'][str(index)] = dict(window_id=wid, terminal_id=sid, receipt=token)
+                    if created.get('presentationWarnings'):
+                        record.setdefault('presentation_warnings', []).extend(created['presentationWarnings'])
                     self.store.transition(record, Phase.CHECKING)
                 except Exception as error:
                     # Reload durable state: a save could have committed before
@@ -280,6 +314,18 @@ class Workflow:
                     if record['phase'] != Phase.RETURNED.value:
                         self.note(record, error)
                     return record
-            settled = self.gate.settle(lambda observed: Verifier.returned(record, observed))
+            settled = self.gate.settle(lambda observed: all(Verifier.matching_tab(
+                source.tabs[int(i)], target, observed) for i,target in record['targets'].items()))
+            if not Verifier.returned(record, settled) and all(Verifier.matching_tab(
+                    source.tabs[int(i)], target, settled) for i,target in record['targets'].items()):
+                receipt = self.store.transition(record, Phase.CHECKING, dict(kind='reorder'))
+                try:
+                    self.gate.reorder(receipt)
+                    self.store.transition(record, Phase.CHECKING)
+                except Exception as error:
+                    record = self.store.load(record_id)
+                    if isinstance(error, NotSubmitted): self.store.transition(record, Phase.CHECKING)
+                    return self.note(record, error)
+                settled = self.gate.settle(lambda observed: Verifier.returned(record, observed))
             self.reconcile_record(record, settled)
             return record

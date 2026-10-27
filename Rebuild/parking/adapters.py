@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 import os
 import subprocess
+import time
 from .model import ParkingError, Uncertain, NotSubmitted
 
 
@@ -20,11 +21,13 @@ class ITerm:
         self.script = Path(script) if script else Path(__file__).with_name('terminal.js')
 
     def call(self, action, **kwargs):
-        if action not in ('list', 'close', 'create'):
+        if action not in ('list', 'close', 'create', 'reorder'):
             raise ParkingError('Unknown terminal adapter operation.')
         request = json.dumps(dict(action=action, **kwargs))
         try:
-            output = self.runner(['/usr/bin/osascript', '-l', 'JavaScript', str(self.script), request],
+            argv = (['/usr/bin/python3', str(self.script.with_name('layout_api.py')), request] if action == 'reorder'
+                    else ['/usr/bin/osascript', '-l', 'JavaScript', str(self.script), request])
+            output = self.runner(argv,
                                  timeout=None if action == 'close' else 30)
             result = json.loads(output)
         except Exception as error:
@@ -36,11 +39,26 @@ class ITerm:
         if action != 'list' and not isinstance(result, dict):
             raise Uncertain('iTerm returned an unreadable operation receipt.')
         if action != 'list' and isinstance(result.get('notSubmitted'), str):
-            raise NotSubmitted(result['notSubmitted'])
+            error = NotSubmitted(result['notSubmitted'])
+            error.details = result.get('details')
+            raise error
+        if action != 'list' and isinstance(result.get('uncertain'), str):
+            raise Uncertain(result['uncertain'])
         return result
 
     def windows(self):
-        return self.call('list')
+        # AppleEvents expose individual properties, not an atomic desktop.
+        # Retry only these reads, from scratch. A create/close is never replayed.
+        for attempt in range(4):
+            try:
+                return self.call('list')
+            except ParkingError as error:
+                transient = '-1728' in str(error) or 'FP_READ_RACE' in str(error)
+                if not transient:
+                    raise
+                if attempt == 3:
+                    raise Uncertain('iTerm’s layout is still changing. No complete window inventory could be read; nothing was assumed closed. '+str(error)) from error
+                time.sleep(0.1 * (attempt + 1))
 
 
 class Processes:

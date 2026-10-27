@@ -62,7 +62,7 @@ def validate(record):
             raise ParkingError('Invalid native archive receipt.')
     intent = record.get('intent')
     if intent is not None:
-        if intent.get('kind') not in ('close', 'create', 'interrupt', 'native_archive', 'stop_client'):
+        if intent.get('kind') not in ('close', 'create', 'interrupt', 'native_archive', 'stop_client', 'reorder'):
             raise ParkingError('Invalid operation intent.')
         if intent['kind'] in ('create', 'interrupt', 'native_archive', 'stop_client'):
             if type(intent.get('index')) is not int or not 0 <= intent['index'] < len(source.tabs):
@@ -89,6 +89,7 @@ def validate(record):
 
 class Store:
     def __init__(self, root):
+        self.progress = None
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
@@ -141,9 +142,24 @@ class Store:
             validate(record)  # Corruption is visible, never silently skipped.
         return records
 
+    def readable(self):
+        """Show intact recoveries alongside errors; never rewrite invalid rows."""
+        with self.connection() as db:
+            rows = db.execute('SELECT id, body FROM records ORDER BY rowid DESC').fetchall()
+        records, errors = [], []
+        for ident, body in rows:
+            try:
+                record = json.loads(body)
+                validate(record)
+                if record['id'] != ident: raise ParkingError('Record ID disagrees with storage.')
+                records.append(record)
+            except Exception as error:
+                errors.append('Recovery '+ident+' could not be read: '+str(error)+'. The original data is kept in '+str(self.path))
+        return records, errors
+
     def begin(self, window):
         window.validate()
-        for record in self.all():
+        for record in self.readable()[0]:
             if record['phase'] != Phase.RETURNED.value and record['fingerprint'] == window.fingerprint:
                 return record, self.receipt(record)
         record = dict(schema=2, id=str(uuid.uuid4()), revision=0,
@@ -171,6 +187,8 @@ class Store:
             raise ParkingError('Durable recovery readback failed.')
         record.clear()
         record.update(candidate)
+        if self.progress:
+            self.progress(record)
         return self.receipt(record)
 
     def receipt(self, record):
@@ -186,7 +204,8 @@ class Store:
     def transition(self, record, phase, intent=None, issue=None):
         record.update(phase=phase.value, intent=intent, issue=issue, issue_kind=None)
         if phase != Phase.CLOSING: record.pop('close_confirmed', None)
-        record['events'].append(dict(phase=phase.value, intent=intent, issue=issue))
+        record['events'].append(dict(phase=phase.value, intent=intent, issue=issue,
+            at=datetime.datetime.now(datetime.timezone.utc).isoformat()))
         return self.save(record)
 
 

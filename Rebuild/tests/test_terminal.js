@@ -1,19 +1,27 @@
 // This executes the shipped JXA adapter inside a fake object-model boundary.
 const fs=require('node:fs'),vm=require('node:vm'),assert=require('node:assert/strict');
 let mutations=[], token='fixture-token';
-const session={id:()=> 'test-tab',tty:()=>'/dev/test',name:()=> 'Session name',variable:()=>token};
+const session={id:()=> 'test-tab',tty:()=>'/dev/test',name:()=> 'Session name',variable:({named})=>named==='user.freeParkingReceipt'?token:'Raw session name'};
 const tab={sessions:()=>[session],title:()=> 'Actual tab title',currentSession:()=>session};
 const workSession={id:()=> 'protected',tty:()=> '/dev/work',name:()=> 'Work',variable:()=>''};
 const work={id:()=>1,tabs:()=>[{sessions:()=>[workSession]}],close:()=>{throw Error('Protected window changed')}};
 const test={id:()=>2,tabs:()=>[tab],close:()=>mutations.push('close'),createTabWithDefaultProfile:()=>{mutations.push('append');return tab;},currentTab:()=>tab};
 let raw=[work,test];
 const app={running:()=>true,windows:()=>raw,createWindowWithDefaultProfile:()=>{mutations.push('create');return test;}};
+app.windows.byId=id=>raw.find(w=>w.id()===id)||{id:()=>{throw Error("Can't get object. (-1728)")},tabs:()=>{throw Error("Can't get object. (-1728)")}};
+app.windows.id=()=>raw.map(w=>w.id());
+for (const w of [work,test]) {
+  w.tabs.sessions={};
+  for (const property of ['id','tty','name']) w.tabs.sessions[property]=()=>w.tabs().map(t=>t.sessions().map(s=>s[property]()));
+  w.tabs.title=()=>w.tabs().map(t=>t.title ? t.title() : '');
+}
 const ctx=vm.createContext({Application:()=>app});
 vm.runInContext(fs.readFileSync('Rebuild/parking/terminal.js','utf8'),ctx);
 const call=r=>JSON.parse(ctx.run([JSON.stringify(r)]));
 const listed=call({action:'list'});
 assert.equal(listed[1].tabs[0].sessions[0].title,'Actual tab title');
 assert.equal(listed[1].tabs[0].sessions[0].receipt,'fixture-token');
+assert.equal(listed[1].tabs[0].sessions[0].name,'Raw session name');
 assert.deepEqual(mutations,[]);
 for(const action of ['close','create'])assert.ok(call({action,windowId:'2',sessionIds:['protected'],command:'fixture'}).notSubmitted);
 assert.deepEqual(mutations,[]);
@@ -24,4 +32,13 @@ raw=[work,{...test,tabs:()=>[{sessions:()=>[session,workSession]}]}];
 assert.ok(call({action:'close',windowId:'2',sessionIds:['test-tab','protected']}).notSubmitted);
 assert.throws(()=>call({action:'quit'}));
 assert.deepEqual(mutations,['close','append']);
+raw=[work,test];
+let renamed='Session name';
+Object.defineProperty(tab,'title',{get:()=>()=> 'Actual tab title',set:()=>{throw Error('Native tab title is read-only')},configurable:true});
+Object.defineProperty(session,'name',{get:()=>()=>renamed,set:value=>{renamed=value},configurable:true});
+const titled=call({action:'create',windowId:null,sessionIds:[],command:'fixture',title:'Saved Unicode title — café'});
+assert.deepEqual(titled.presentationWarnings,[]);
+assert.equal(renamed,'Saved Unicode title — café');
+call({action:'create',windowId:null,sessionIds:[],command:'fixture',title:'Claude Code (claude)',name:'Claude Code'});
+assert.equal(renamed,'Claude Code');
 console.log('Fresh JXA adapter: raw inventory, real tab label, receipt, exact-target close/append, split/unknown guards passed (offline object model).');

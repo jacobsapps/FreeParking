@@ -54,8 +54,14 @@ class Tab:
     activity: str = "unknown"
     turn_id: str = ""
     shell_command: str = ""
+    permissions: dict = field(default_factory=dict)
+    terminal_name: str = ""
 
     def validate(self):
+        if not isinstance(self.terminal_name, str):
+            raise ParkingError("Saved terminal name is unreadable.")
+        if not isinstance(self.permissions, dict):
+            raise ParkingError('Saved session permissions are unreadable.')
         if self.shell_command not in ('', 'caffeinate') or (self.shell_command and self.provider != 'shell'):
             raise ParkingError('Unsupported saved shell command.')
         if self.activity not in ('unknown', 'idle', 'running', 'waiting'):
@@ -76,7 +82,8 @@ class Tab:
     @property
     def identity(self):
         return (self.terminal_id, self.tty, self.provider, self.session_id,
-                self.cwd, self.process.key) + ((self.shell_command,) if self.shell_command else ())
+                self.cwd, self.process.key) + ((self.shell_command,) if self.shell_command else ()) + (
+                    (json.dumps(self.permissions, sort_keys=True),) if self.permissions else ())
 
     def encode(self):
         self.validate()
@@ -95,6 +102,7 @@ class Tab:
 class Window:
     window_id: str
     tabs: tuple
+    bounds: dict = field(default_factory=dict)
 
     def validate(self):
         if not self.window_id or not self.tabs:
@@ -111,11 +119,11 @@ class Window:
 
     def encode(self):
         self.validate()
-        return dict(window_id=self.window_id, tabs=[t.encode() for t in self.tabs])
+        return dict(window_id=self.window_id, tabs=[t.encode() for t in self.tabs], bounds=self.bounds)
 
     @classmethod
     def decode(cls, data):
-        window = cls(data['window_id'], tuple(Tab.decode(t) for t in data['tabs']))
+        window = cls(data['window_id'], tuple(Tab.decode(t) for t in data['tabs']), data.get('bounds', {}))
         window.validate()
         return window
 

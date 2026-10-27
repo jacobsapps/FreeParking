@@ -58,6 +58,16 @@ class AgentContracts(unittest.TestCase):
         self.assertEqual((tab.session_id,tab.activity),(self.sid,'running'))
         self.assertIn('--resume',provider.launch(tab,str(uuid.uuid4()),'please continue'))
 
+    def test_claude_resume_uses_login_shell_lookup_across_install_locations(self):
+        provider,_=self.native_claude()
+        launch=shlex.split(provider.launch(self.tab,str(uuid.uuid4())))
+        self.assertEqual(launch[:2],['/bin/zsh','-lc'])
+        self.assertEqual(shlex.split(launch[2].split(' && exec ',1)[1]),
+                         ['claude','--permission-mode','plan','--resume',self.sid])
+        provider.executable='/custom path/claude'
+        launch=shlex.split(provider.launch(self.tab,str(uuid.uuid4())))
+        self.assertEqual(shlex.split(launch[2].split(' && exec ',1)[1])[0],'/custom path/claude')
+
     def test_claude_stale_registry_never_falls_back_to_title(self):
         provider,record=self.native_claude();record['procStart']='wrong'
         (provider.root/'sessions/31.json').write_text(json.dumps(record))

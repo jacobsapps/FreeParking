@@ -120,9 +120,36 @@ class Gate:
             request = self.prepare_create(receipt)
             self.record(receipt)  # Recheck durability after the settling wait.
         except Exception as error:
-            raise NotSubmitted(str(error)) from error
+            refused = NotSubmitted(str(error))
+            refused.details = getattr(error, 'details', None)
+            raise refused from error
         # Exceptions beyond this boundary remain uncertain, never auto-replayed.
         return self.terminal.call('create', **request)
+
+    def reorder(self, receipt):
+        try:
+            record = self.record(receipt)
+            if record['phase'] != Phase.CHECKING.value or record['intent'] != {'kind':'reorder'}:
+                raise ParkingError('Restoring tab order requires a durable layout intent.')
+            source = Window.decode(record['source'])
+            snapshot = self.observer.observe()
+            if not Verifier.source_absent(record, snapshot): raise ParkingError('Original tabs are still present.')
+            if set(record['targets']) != {str(i) for i in range(len(source.tabs))}:
+                raise ParkingError('Every saved tab must be open before restoring its order.')
+            targets = [record['targets'][str(i)] for i in range(len(source.tabs))]
+            if len({t['window_id'] for t in targets}) != 1 or not all(
+                    Verifier.matching_tab(saved, target, snapshot) for saved,target in zip(source.tabs,targets)):
+                raise ParkingError('Returned conversations changed or moved into different windows.')
+            raw = snapshot.raw_window(targets[0]['window_id'])
+            if any(len(t['sessions']) != 1 for t in raw['tabs']): raise ParkingError('The destination now has split panes.')
+            actual = [t['sessions'][0]['id'] for t in raw['tabs']]
+            owned = [t['terminal_id'] for t in targets]
+            ordered = iter(owned)
+            desired = [next(ordered) if sid in owned else sid for sid in actual]
+            self.record(receipt)
+        except Exception as error:
+            raise NotSubmitted(str(error)) from error
+        return self.terminal.call('reorder', windowId=targets[0]['window_id'],sessionIds=actual,desiredIds=desired)
 
     def prepare_create(self, receipt):
         record = self.record(receipt)
@@ -139,16 +166,24 @@ class Gate:
         wid = intent.get('window_id')
         ids = []
         if wid:
-            targets = [record['targets'][str(i)] for i in range(intent['index'])]
+            indices = sorted(map(int, record['targets']))
+            targets = [record['targets'][str(i)] for i in indices]
             if any(t['window_id'] != wid for t in targets):
                 raise ParkingError('Returned tabs have split across windows.')
             raw = snapshot.raw_window(wid)
             ids = [t['terminal_id'] for t in targets]
             actual = [s['id'] for t in raw['tabs'] for s in t['sessions']] if raw else []
-            if not all(Verifier.matching_tab(source.tabs[i], t, snapshot) for i, t in enumerate(targets)):
+            if not all(Verifier.matching_tab(source.tabs[i], t, snapshot) for i, t in zip(indices, targets)):
                 raise ParkingError('A previously returned conversation changed. No tab was appended.')
-            if ids != actual:
-                raise ParkingError('The returned window changed. No tab was appended.')
+            if sorted(ids) != sorted(sid for sid in actual if sid in ids):
+                error = ParkingError('The returned window changed. No tab was appended. Review its tabs, then retry; recovery is kept.')
+                error.details = dict(expected_window_id=wid, expected_session_ids=ids, observed_session_ids=actual)
+                raise error
+            # Extra user tabs and temporary order changes are allowed. A
+            # replaced middle tab is appended before the final layout repair.
+            # The native gate compares the entire current destination and final
+            # verification still requires every saved conversation in order.
+            ids = actual
         tab = source.tabs[intent['index']]
         allowed = {t['terminal_id'] for t in record['targets'].values()}
         if Verifier.other_conversation_tabs(tab, snapshot, allowed):
@@ -163,4 +198,5 @@ class Gate:
             # it does not require sending it when its evidence becomes uncertain.
             if not eligible: prompt = None
         command = provider.launch(tab, intent['receipt'], prompt=prompt) if prompt is not None else provider.launch(tab, intent['receipt'])
-        return dict(windowId=wid, sessionIds=ids, command=command)
+        return dict(windowId=wid, sessionIds=ids, command=command,
+                    title=tab.title, name=tab.terminal_name, bounds=source.bounds if wid is None else {})

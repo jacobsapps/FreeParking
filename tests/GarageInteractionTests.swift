@@ -39,6 +39,8 @@ struct GarageInteractionTests {
         var partial = pendingTitles
         partial.restoredTargets?.removeValue(forKey: "2")
         precondition(!partial.allLaunchesRecorded && !partial.awaitingTabNames)
+        precondition(partial.openedTabCount == 2 && partial.partialRestoreLabel == "2 of 3 tabs opened")
+        precondition(pendingTitles.openedTabCount == 3 && pendingTitles.partialRestoreLabel == nil)
         precondition(garage.issue(for: partial)?.summary == "Opening incomplete")
         var ambiguous = pendingTitles
         ambiguous.pendingTab = 2

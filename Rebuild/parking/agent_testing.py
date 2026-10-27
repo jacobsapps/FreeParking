@@ -1,6 +1,7 @@
 """Creation of new, owned agent conversations for the disposable lab only."""
 from pathlib import Path
 import subprocess
+import shlex
 import time
 import uuid
 from .adapters import ITerm
@@ -26,8 +27,8 @@ class AgentSeeder:
         if provider == 'claude':
             sid=str(uuid.uuid4());intent=root/'seed-intents'/(sid+'.json')
             atomic_json(intent,dict(provider=provider,session_id=sid,cwd=folder,message=SEED))
-            result=subprocess.run([str(Path.home()/'.local/bin/claude'),'-p',SEED,
-                '--session-id',sid,'--max-turns','1','--tools',''],cwd=folder,
+            argv=['claude','-p',SEED,'--session-id',sid,'--max-turns','1','--tools','']
+            result=subprocess.run(['/bin/zsh','-lc','exec '+shlex.join(argv)],cwd=folder,
                 stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=120)
             atomic_json(root/'seed-results'/(sid+'.json'),dict(exit_code=result.returncode,stdout=result.stdout,stderr=result.stderr))
             if result.returncode or result.stdout.strip()!='READY':

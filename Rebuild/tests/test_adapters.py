@@ -18,6 +18,30 @@ from parking.verifier import Observer
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_transient_object_read_restarts_the_whole_inventory_only(self):
+        runner=Mock(side_effect=[ParkingError("Can't get object. (-1728)"),
+                                 ParkingError('FP_READ_RACE: changed'), '[{"id":"settled","tabs":[]}]'])
+        with patch('parking.adapters.time.sleep'):
+            self.assertEqual(ITerm(runner).windows(),[dict(id='settled',tabs=[])])
+        self.assertEqual(runner.call_count,3)
+        self.assertTrue(all(json.loads(c.args[0][-1])['action']=='list' for c in runner.call_args_list))
+
+    def test_persistent_layout_churn_is_uncertain_never_empty(self):
+        runner=Mock(side_effect=ParkingError("Can't get object. (-1728)"))
+        with patch('parking.adapters.time.sleep'), self.assertRaises(Uncertain):
+            ITerm(runner).windows()
+        self.assertEqual(runner.call_count,4)
+
+    def test_permission_failure_is_not_a_transient_layout_retry(self):
+        runner=Mock(side_effect=ParkingError('Not authorized (-1743)'))
+        with self.assertRaises(ParkingError): ITerm(runner).windows()
+        self.assertEqual(runner.call_count,1)
+
+    def test_object_read_error_after_create_submission_is_never_replayed(self):
+        runner=Mock(side_effect=ParkingError("Can't get object. (-1728)"))
+        with self.assertRaises(Uncertain): ITerm(runner).call('create',windowId=None,command='fixture')
+        self.assertEqual(runner.call_count,1)
+
     def test_list_failure_is_not_empty_inventory(self):
         adapter=ITerm(runner=Mock(side_effect=PermissionError('Denied')))
         with self.assertRaises(ParkingError):adapter.windows()

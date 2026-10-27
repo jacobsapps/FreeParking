@@ -21,9 +21,12 @@ DEFAULT_ROOT = Path.home() / 'Library/Application Support/Free Parking/Recovery-
 def compose(root=DEFAULT_ROOT, scope_path=None, test_close_response=None, live=False):
     terminal, processes = ITerm(), Processes()
     if scope_path:
-        # Safety package is bundled separately and cannot import legacy workflow.
+        # Developer harness only. Neither module is shipped in the release.
+        try:
+            from .testing import FixtureTerminal
+        except ImportError as error:
+            raise ParkingError('Test scoping is unavailable in the release app. It always uses all iTerm windows.') from error
         from test_safety import Scope, ScopedTerminal, ScopedProcesses
-        from .testing import FixtureTerminal
         scope = Scope(scope_path)
         root = scope.path.parent / 'rebuild-garage'
         old = Path.home() / 'Library/Application Support/Car Park'

@@ -18,8 +18,15 @@ BIN_DIR="$(swift build -c release --show-bin-path)"
 cp "$BIN_DIR/FreeParking" "$APP/Contents/MacOS/FreeParking"
 cp Rebuild/backend.py Rebuild/garage_backend.py "$APP/Contents/Resources/rebuild/"
 cp Rebuild/parking/*.py Rebuild/parking/terminal.js "$APP/Contents/Resources/rebuild/parking/"
-rm -f "$APP/Contents/Resources/rebuild/parking/confirmation_testing.py" "$APP/Contents/Resources/rebuild/parking/codex_testing.py" "$APP/Contents/Resources/rebuild/parking/agent_testing.py"
-cp Resources/test_safety.py "$APP/Contents/Resources/rebuild/"
+SDK_FINGERPRINT="$(shasum -a 256 Rebuild/iterm-api-requirements.txt | awk '{print $1}')"
+if [[ ! -f .build/iterm-api/.ready || "$(cat .build/iterm-api/.ready)" != "$SDK_FINGERPRINT" ]]; then
+  rm -rf .build/iterm-api
+  /usr/bin/python3 -m pip install --disable-pip-version-check --no-compile --target .build/iterm-api -r Rebuild/iterm-api-requirements.txt
+  printf '%s' "$SDK_FINGERPRINT" > .build/iterm-api/.ready
+fi
+ditto .build/iterm-api "$APP/Contents/Resources/rebuild/vendor"
+cp Rebuild/THIRD-PARTY.txt Rebuild/ITERM-API-LICENSE.txt "$APP/Contents/Resources/rebuild/"
+rm -f "$APP/Contents/Resources/rebuild/parking/confirmation_testing.py" "$APP/Contents/Resources/rebuild/parking/codex_testing.py" "$APP/Contents/Resources/rebuild/parking/agent_testing.py" "$APP/Contents/Resources/rebuild/parking/testing.py" "$APP/Contents/Resources/rebuild/parking/lab.py"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -31,8 +38,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>CFBundleDisplayName</key><string>$NAME</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.4.3</string>
-<key>CFBundleVersion</key><string>2026101504</string>
+<key>CFBundleShortVersionString</key><string>0.5.0</string>
+<key>CFBundleVersion</key><string>2026102704</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSAppleEventsUsageDescription</key><string>Save and restore your iTerm windows when you choose Park my windows.</string>
 <key>NSDocumentsFolderUsageDescription</key><string>Access your saved session folders in Documents to reopen Claude and Codex in the same place.</string>

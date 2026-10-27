@@ -1,0 +1,99 @@
+FREE PARKING 0.5.0 — REPAIR AND ACCEPTANCE
+2026-10-27
+
+Implementation
+--------------
+The release operates on every iTerm window. Fixture scope code is excluded from
+the bundle and the release Swift app ignores --test-scope. The developer harness
+loads its independent protection from outside the app.
+
+Native window references are rebound by immutable ID. Bulk, coherent inventory
+reads replace position-based enumeration. Transient -1728/read-race failures
+retry reads; submitted creates and closes are never blindly replayed. Definite
+pre-submission create refusals retry at most twice with fresh verification.
+
+Every source tab remains in durable recovery. Explicit remaining-tab recovery
+keeps existing returned tabs, recovers missing targets, and permits unrelated
+user tabs. A separate public iTerm API companion restores original relative
+order atomically when a missing middle tab has to be recreated. Exact identity,
+receipt, folder and final-order verification remain mandatory.
+
+Park All validates resume commands/executables before closing any source. It
+saves every window first, records a durable batch ID and per-window outcomes,
+and shows a complete batch summary. Refresh no longer archives untouched saves
+as though they had returned. Finish parking handles both still-open saves and
+saved windows the user subsequently closed.
+
+The car shows up to eight tab titles, a discoverable full list, per-tab states,
+opened/remaining counts and an explicit remaining-tab button. Native helper
+progress includes window/tab stages; the UI shows elapsed time. Messages and
+live inventory survive completion. Menus reflect their actual actions. Manual
+recovery commands omit tabs already returned or awaiting an ambiguous receipt.
+Verified archived backups open their saved details rather than a no-op unarchive.
+
+Claude resolves through the login shell instead of a hard-coded installation
+path. Per-tab verified permissions are stored where available. Unknown Codex
+modes explicitly use read-only/on-request; unknown Claude modes use plan mode.
+No global YOLO default is inherited. Warm Codex resume confirmation understands
+these explicit flags without treating launch arguments as automatic identity.
+
+Saved geometry and names are applied to newly created windows/tabs. iTerm's
+read-only tab-title property falls back to its session-name setter. Presentation
+failure cannot cause another conversation launch. One malformed recovery row
+does not hide intact records. Complete legacy parked saves import once while
+retaining the originals; ambiguous legacy launches remain visible for review.
+All transitions have timestamps and native mismatch diagnostics retain expected
+and observed session IDs.
+
+Evidence completed before the final desktop test
+-----------------------------------------------
+- 318 backend component tests, 171 legacy/outer guard tests, Swift garage model
+  and bridge contracts, and the JXA object-model checks passed.
+- Real seven-tab mixed Claude/Codex window: saved, closed, restored; seven exact
+  conversation IDs, folders, receipts and original order verified.
+- Real seven-folder partial return: fourth creation deliberately refused, the
+  second of three returned tabs closed normally, then all seven restored in
+  original order. This test exposed and verified a further append-order fix.
+- Native public-API reorder verified on receipt-owned disposable tabs.
+- Seven historical conversations selected from Backtrace's index: installed
+  helper parked them in about 23 seconds and restored all seven in about 31
+  seconds. Exact persisted IDs/folders/order were checked. A first attempt that
+  encountered a Claude folder-trust screen was retained as failed setup; no
+  original work window was closed. A ready historical session replaced it.
+- Busy Claude and Codex: both running tasks were confirmed interrupted, both
+  exact sessions reopened, and each received exactly one continuation message.
+- Test fixtures were closed using original creation receipts. Old working
+  window identities and ordering were preserved during scoped/per-window tests.
+- Installed native app launched successfully and rendered its own live view,
+  showing the full two-window/ten-tab desktop at that point. Accessibility is
+  unavailable to the test driver, so this is not a claim of automated UI clicks.
+- iTerm's global multi-tab/quit prompts, Default profile close prompt, and all
+  configured profile notification types were read back as disabled, as requested.
+
+Final whole-desktop acceptance: PASSED
+---------------------------------------
+The controller ran outside iTerm under launchd and invoked the installed
+--live Park All path. All 3 original windows / 12 tabs closed,
+including the actual supervising Codex agent window. All 12 tabs then
+returned with their exact conversation IDs, folders, grouping and saved
+order verified. No scope or agent exclusion was enabled. The supervising
+conversation was restored last. Original recoveries and test evidence
+are retained locally. This full-desktop test used build 2026102703.
+
+Final title follow-up: build 2026102704 separately saves the raw iTerm name
+so profile job suffixes do not accumulate. Two additional real two-tab
+park/restore cycles passed on this final installed build, with unchanged
+working-window identities and no added suffixes. Conversation identity and
+order were verified on both cycles. Installed version: 0.5.0, build 2026102704.
+
+Practical limits
+----------------
+Original incident artifacts from the other Mac are unavailable, so its exact
+native mismatch trigger cannot be retrospectively proven. The observed failure
+mechanisms and native seven-tab behavior are tested rather than inferred from
+fake tests. Split panes, unknown foreground programs and uninitialized agents
+remain explicitly unparkable: recovery identity is never guessed. Unknown
+submitted operations stay pending rather than risking duplicate conversations.
+The current Codex read API does not expose verified live permission settings;
+the conservative fallback is deliberate and visible. Native API permission is
+required only when tab order needs repair. Third-party licenses are bundled.

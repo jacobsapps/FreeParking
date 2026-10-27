@@ -26,9 +26,19 @@ def resume_candidate(process, session, processes, rpc):
     try: argv = shlex.split(command)
     except ValueError: return None
     # Deliberately narrow: no picker, --last, title, fork or arbitrary prompt.
-    if len(argv) != 3 or argv[1] != 'resume' or argv[0] != process.executable:
+    if not argv or argv[0] != process.executable:
         return None
-    try: sid = str(uuid.UUID(argv[2]))
+    # Our explicit permission overrides can precede resume. Accept only known
+    # option/value pairs; never treat --last, --fork or a prompt as identity.
+    rest = argv[1:]
+    allowed = {'--sandbox': {'read-only','workspace-write','danger-full-access'},
+               '--ask-for-approval': {'on-request','never'}}
+    seen = set()
+    while rest and rest[0] in allowed:
+        if len(rest) < 2 or rest[0] in seen or rest[1] not in allowed[rest[0]]: return None
+        seen.add(rest[0]); rest = rest[2:]
+    if len(rest) != 2 or rest[0] != 'resume': return None
+    try: sid = str(uuid.UUID(rest[1]))
     except ValueError: return None
     thread = rpc.call('thread/read', dict(threadId=sid, includeTurns=False))['thread']
     cwd = processes.cwd(process.pid)

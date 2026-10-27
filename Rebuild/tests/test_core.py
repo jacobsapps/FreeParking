@@ -48,6 +48,11 @@ class Desktop:
             if not self.cancel: self.live = [w for w in self.live if w.window_id != kwargs['windowId']]
             if self.lose_close: raise Uncertain('Lost close receipt')
             return {'acknowledged':True}
+        if action == 'reorder':
+            w = next(w for w in self.live if w.window_id == kwargs['windowId'])
+            by_id = {t.terminal_id:t for t in w.tabs}
+            self.live[self.live.index(w)] = Window(w.window_id, tuple(by_id[sid] for sid in kwargs['desiredIds']))
+            return {'acknowledged':True}
         if self.fail_create: raise Uncertain('Create did not return a receipt')
         import re, base64
         encoded = re.search(r'freeParkingReceipt=([A-Za-z0-9+/=]+)',kwargs['command']).group(1)

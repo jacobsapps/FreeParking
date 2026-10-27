@@ -20,6 +20,9 @@ struct CarDetails: View {
             }
             SessionList(tabs: car.tabs, exporting: exporting)
             HStack {
+                if !car.hasReturned {
+                    Button(car.actionLabel) { dismiss(); garage.open(car) }.buttonStyle(ParkingButtonStyle()).disabled(garage.busy)
+                }
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(ParkingButtonStyle(prominent: true))
             }
@@ -44,8 +47,9 @@ struct RecoveryDetails: View {
             Text(garage.issue(for: car)?.detail ?? "Your saved folders and session IDs are kept in a local recovery file. Click the car to reopen its window in iTerm.")
                 .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Copy resume commands") { garage.copyCommands(car) }
+                Button("Copy remaining commands") { garage.copyCommands(car) }
                     .buttonStyle(ParkingButtonStyle())
+                    .disabled(car.commands.isEmpty)
                 Button("Recovery file") { garage.reveal(car) }.buttonStyle(ParkingButtonStyle())
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(ParkingButtonStyle(prominent: true))
@@ -108,6 +112,13 @@ private struct SessionList: View {
                         .padding(.top, 2)
                     VStack(alignment: .leading, spacing: 5) {
                         Text(tab.displayTitle).font(.system(size: 13, weight: .medium))
+                        if let state = tab.restoreState {
+                            Text(state == "opened" ? "Opened in iTerm" : state == "checking" ? "Checking launch — do not open twice" : "Saved, ready to open")
+                                .font(.system(size: 11)).foregroundStyle(state == "opened" ? ParkingStyle.ink : ParkingStyle.secondary)
+                        }
+                        if let permissions = tab.permissionLabel, !permissions.isEmpty {
+                            Text(permissions).font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)
+                        }
                         if tab.issue.isEmpty {
                             Text("\(tab.label), \(tab.shortPath)")
                                 .font(.system(size: 11)).foregroundStyle(ParkingStyle.secondary)

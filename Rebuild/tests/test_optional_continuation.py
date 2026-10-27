@@ -40,6 +40,7 @@ class OptionalContinuationTests(unittest.TestCase):
         self.processes.all.side_effect = lambda: ({first.process.pid: dict(started=first.process.started)}
             if any(w.window_id == 'fixture' for w in self.desktop.live) else {})
         self.provider = Claude(self.processes, self.root/'claude', executable='/fixture/claude')
+        self.provider.preflight = Mock()  # Executable lookup is an OS boundary in this fake desktop.
         self.path = self.root/'claude/projects/project'/(self.sid+'.jsonl')
         self.path.parent.mkdir(parents=True)
         self.entry('system')  # Exact persisted identity exists even without a request.
@@ -52,8 +53,8 @@ class OptionalContinuationTests(unittest.TestCase):
         def call(action, **kwargs):
             if action == 'create':
                 argv = shlex.split(shlex.split(kwargs['command'])[2].split(' && exec ', 1)[1])
-                self.assertEqual(argv[:3], ['/fixture/claude', '--resume', self.sid])
-                self.prompts.append(argv[3:])
+                self.assertEqual(argv[:5], ['/fixture/claude', '--permission-mode', 'plan', '--resume', self.sid])
+                self.prompts.append(argv[5:])
             result = original(action, **kwargs)
             if action == 'create':
                 live = self.desktop.live[-1]

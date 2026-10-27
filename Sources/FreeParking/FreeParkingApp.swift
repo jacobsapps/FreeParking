@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 
 enum GarageLayout {
-    static let width: CGFloat = 560
-    static let height: CGFloat = 460
+    static let width: CGFloat = 660
+    static let height: CGFloat = 560
 }
 
 @main

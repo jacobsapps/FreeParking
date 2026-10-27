@@ -37,6 +37,19 @@ class GarageTests(unittest.TestCase):
         self.assertEqual(result[0]['phase'],'saved');self.assertEqual(len(self.desktop.calls),1)
         self.assertEqual(len(self.desktop.live),2)
 
+    def test_refresh_keeps_saved_open_batch_windows_available_to_finish_parking(self):
+        self.desktop.cancel=True
+        park_all(self.store,self.desktop,self.flow)
+        with patch('parking.garage.compose',return_value=(self.store,self.desktop,self.flow)):
+            scanned=dispatch(['--live','scan'])
+            self.assertEqual(len(scanned['cars']),2)
+            self.assertEqual(scanned['archives'],[])
+            self.desktop.cancel=False
+            for car in scanned['cars']:
+                reply=dispatch(['--live','finish-parking',car['id']])
+                self.assertTrue(reply['ok'],reply.get('error'))
+        self.assertEqual(self.desktop.live,[])
+
     def test_a_failed_second_save_prevents_first_close(self):
         original=self.store.begin
         def begin(window):

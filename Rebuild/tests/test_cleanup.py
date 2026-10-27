@@ -28,6 +28,23 @@ class CleanupTests(unittest.TestCase):
         self.terminal.windows.return_value[0]['tabs']=[]
         with self.assertRaises(ParkingError):self.cleanup.authorize('test')
 
+    def test_reordered_surviving_owned_tabs_keep_original_receipts(self):
+        self.scope.data['owned']['test']=['test-tab','closed-tab','third-tab']
+        tabs=self.terminal.windows.return_value[1]['tabs']
+        tabs.insert(0,dict(sessions=[dict(id='third-tab',tty='/dev/test')]))
+        original=self.receipt.read_bytes()
+        with patch('cleanup.Scope',return_value=self.scope):
+            cleanup=Cleanup([self.receipt],self.root/'reordered',self.terminal,self.processes)
+        self.assertEqual(cleanup.plan['targets']['test']['ids'],['third-tab','test-tab'])
+        self.assertEqual(cleanup.authorize('test'),3)
+        self.assertEqual(self.receipt.read_bytes(),original)
+
+    def test_unknown_current_tab_never_becomes_owned_by_cleanup(self):
+        self.terminal.windows.return_value[1]['tabs'].append(dict(sessions=[dict(id='unknown',tty='/dev/new')]))
+        with patch('cleanup.Scope',return_value=self.scope):
+            cleanup=Cleanup([self.receipt],self.root/'unknown',self.terminal,self.processes)
+        self.assertEqual(cleanup.plan['targets'],{})
+
     def test_new_test_process_and_changed_receipt_stop_cleanup(self):
         self.processes.all.return_value[2]['started']='reused'
         with self.assertRaises(ParkingError):self.cleanup.authorize('test')

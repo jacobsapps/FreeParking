@@ -1,0 +1,321 @@
+FREE PARKING — HOLISTIC DIAGNOSIS
+2026-10-27
+
+Scope and evidence
+------------------
+Reviewed handover commit: 76fcb953bf47d218fcbdd75e6083f9b1becb3d47.
+The pristine review worktree is separate from the uninstalled repair prototype.
+Implementation edits were frozen when Jacob requested diagnosis before fixes.
+Nothing from the prototype has been installed or published.
+
+Evidence levels below distinguish source-confirmed behaviour, controlled
+reproductions, live observations, and unresolved incident causes. A passing
+component test or a rendered preview is not installed-app acceptance.
+
+The October 27 incident's private database and diagnostic files are not present
+on this Mac. The handover is the available evidence for that incident: windows
+with two and seven saved tabs each had only one returned target. Its original
+native topology change has NOT been established during this audit.
+
+The central failure chain
+-------------------------
+The unchanged workflow reproduces this sequence with real temporary SQLite and
+a fake terminal boundary:
+
+  save seven tabs -> close source window -> create tab one
+  -> second append is refused -> return immediately -> six tabs never launched
+
+Result: seven saved source entries, one returned target, phase checking,
+issue_kind not_submitted, no outstanding mutation intent. The UI still displays
+the first saved title and "7 tabs". This explains the failure mechanism without
+claiming why the original native target stopped matching.
+
+A definite refusal can currently be retried successfully if the original
+returned tab remains valid. That positive case also reproduced: seven targets,
+seven total creates, no duplicate first tab. Recovery is not uniformly broken;
+its ability to finish depends on which partial state the desktop reaches.
+
+Findings: recovery and native operations
+----------------------------------------
+01. A later-tab refusal aborts the whole remaining restore.
+    REPRODUCED against the unchanged seven-tab workflow. A pre-submission
+    refusal on tab two leaves tabs three through seven unattempted as well.
+    The application has no first-class per-tab recovery queue or visible
+    "resume these six remaining tabs" operation.
+    Evidence: parking/workflow.py:233-282; contract-reproductions.json.
+
+02. A returned tab that subsequently closes can strand recovery.
+    REPRODUCED. After one target returned and then disappeared, two retries
+    made zero additional creates and left the record incomplete. The code
+    deliberately refuses automatic duplication/reordering, but provides no
+    integrated way to rebuild the missing target and finish the window.
+    Evidence: parking/workflow.py:226-230; contract-reproductions.json.
+
+03. Extra-tab policy is inconsistent during and after restoration.
+    REPRODUCED: adding an unrelated tab after the first returned target stops
+    all remaining appends. prepare_create requires the entire destination tab
+    list to equal only the application's recorded targets. Final verification
+    permits unrelated extra tabs while checking the saved targets' relative
+    order. The user-facing policy for this ordinary desktop change is unclear.
+    Evidence: parking/safety.py:139-151; parking/verifier.py:157-160.
+
+04. Transient iTerm reads can terminate a partial restore.
+    SOURCE-CONFIRMED and reported in the handover incident. The baseline list
+    adapter converts a failed read directly into ParkingError. observe_until
+    retries Uncertain, not that read failure. Native properties are read through
+    many separate AppleEvents; there is no coherent snapshot or fresh-read
+    retry for the documented -1728 case. This can stop the loop before another
+    tab is submitted. A failed submitted mutation must remain a separate case.
+    Evidence: parking/adapters.py:23-44; verifier.py:10-27; terminal.js:6-27.
+
+05. The original native topology mismatch remains undiagnosed.
+    UNRESOLVED. Both Python and JXA compare expected destination session IDs
+    against the entire current list, but the refusal does not record those
+    expected/observed lists. Possible read races, startup changes, tab movement
+    and extra tabs have not been distinguished for the production incident.
+    Removing these checks would conceal the failure and risk changing the wrong
+    window. Their observations need to explain the mismatch.
+    Evidence: HANDOVER.txt incident findings; safety.py:139-151; terminal.js:15-19.
+
+06. Claude's executable location is hard-coded incorrectly for this Mac.
+    OBSERVED: Claude is installed through Homebrew, while the assumed
+    ~/.local/bin/claude does not exist. The assumption affects native restoration,
+    displayed manual recovery commands and the fixture seeder. An otherwise
+    correctly saved Claude conversation can fail to launch after its source
+    window has already closed. This is not proven as the other Mac's incident
+    trigger.
+    Evidence: parking/agents.py:60-63,99-102; garage.py:47-52;
+    agent_testing.py:26-34; local executable checks.
+
+07. Resumability is not fully checked before closing source windows.
+    SOURCE-CONFIRMED. Identification verifies saved conversation metadata, but
+    parking does not prove that the later CLI launch specification is usable.
+    Reopen validates folders/transcripts before creating any tabs; it still
+    does not establish executable availability or a ready interactive session.
+    A create receipt is emitted before exec, so a failed command or a folder
+    trust screen can leave an acknowledged terminal without a resumed agent.
+    Evidence: workflow.py:25-104,224-225; agents.py:command/launch;
+    terminal.js:35-47; live trust-screen observations.
+
+08. Park All has no durable batch result or complete partial-batch summary.
+    SOURCE-CONFIRMED. All source recoveries are saved before the first mutation,
+    which is valuable. Windows are then processed sequentially and the batch
+    stops on the first non-parked result. The response follows the last single
+    record, rather than reporting every window's outcome under one batch ID.
+    Read-only completion of that record does not continue the remaining windows.
+    Users cannot readily distinguish parked, untouched and unfinished windows.
+    Evidence: parking/garage.py:62-82,124-141; Models.swift:OperationCompletion.
+
+09. Other unresolved agent tabs can block an otherwise identified window.
+    SOURCE-CONFIRMED. Duplicate protection treats an unresolved same-provider
+    tab anywhere in the observation as a possible competing conversation.
+    The window's can_park status only reflects its own identification, so an
+    enabled per-window Park action can subsequently be refused by global checks.
+    This needs a clear, consistent preflight result. Exact-session protection
+    should remain; silently guessing an identity is not a sound repair.
+    Evidence: parking/verifier.py:100-109; workflow.py:33-34,222-223;
+    garage.py:live_windows.
+
+Findings: visible product behaviour
+------------------------------------
+10. The main screen hides six of a seven-tab window's names.
+    VISUALLY CONFIRMED using the unchanged SwiftUI views with seven fictional
+    saved tabs. The car caption is explicitly source.tabs[0].title. Other titles
+    are behind hover text or the ellipsis menu. A seven-item list exists in the
+    details view, but the primary screen does not make it discoverable enough.
+    Evidence: garage.py:54-58; GarageView.swift:160-169,184-201;
+    SessionDetails.swift:CarDetails; baseline-seven-parked.png.
+
+11. A partial return has no visible returned-versus-saved count.
+    VISUALLY CONFIRMED. The one-of-seven fixture displays "7 tabs" plus
+    "Opening incomplete". The user cannot see "1 opened, 6 still saved" or which
+    individual tabs succeeded. The backend supplies restored_targets, so this
+    information is available but not presented.
+    Evidence: GarageView.swift:184-235; Models.swift:51-119;
+    baseline-one-of-seven-opened.png; baseline-seven-tab-details.png.
+
+12. Progress and pending-state feedback are too opaque.
+    SOURCE-CONFIRMED and visually confirmed. The UI says "Opening..." and
+    "Opening in iTerm...", without the current tab/window, stage or elapsed
+    time. The bridge waits for a complete helper reply. For car actions, the
+    response message is discarded; an otherwise successful pending check can
+    therefore lose its explanatory message. Live inventory also disappears
+    after restore until an explicit refresh.
+    Evidence: Models.swift:189-215,437-506, especially 473-478;
+    baseline-opening-seven-tabs.png.
+
+13. Recovery controls do not clearly represent the action they will perform.
+    SOURCE-CONFIRMED. The ellipsis menu always says "Open in iTerm", even when
+    Garage.open dispatches a read-only check or Finish parking. Copy resume
+    commands includes all source tabs, including ones already returned, so the
+    fallback can encourage manual duplicates. The details list does not show
+    per-tab returned/failed/pending state or an action for remaining tabs.
+    Evidence: GarageView.swift:CarActions; Models.swift:open/commands;
+    SessionDetails.swift:RecoveryDetails; garage.py:car_view.
+
+14. Saved titles and window geometry are not restored by the new core.
+    SOURCE-CONFIRMED. Titles are stored for display, but the terminal adapter
+    supports only list/create/close and never reapplies saved names. Window
+    bounds/position are not stored in the new Window model at all. The legacy
+    backend had presentation restoration that the production rebuild does not
+    carry forward. Geometry is a product-scope gap, not a proven cause of the
+    one-tab incident.
+    Evidence: parking/model.py:Tab/Window; terminal.js; workflow.py:reopen;
+    production bundle construction in Rebuild/build.sh.
+
+Findings: permissions, versions and recoverability
+--------------------------------------------------
+15. The installed legacy app explicitly elevates every resumed agent.
+    OBSERVED ON THIS MAC. Installed version is 0.1.0, build 3. Its bundled
+    resume_command forces Codex danger-full-access/never and Claude
+    --dangerously-skip-permissions. That directly violates the requirement
+    against automatically reopening all windows in YOLO mode.
+    Evidence: installed Contents/Info.plist and Resources/freeparking.py:608-610.
+
+16. The newer recovery schema does not retain per-tab permission settings.
+    SOURCE-CONFIRMED. The handover launch specifications omit the legacy YOLO
+    flags, but Tab does not save sandbox/approval/permission-mode data. The
+    application cannot promise to restore the previous level, and unspecified
+    launch settings may follow CLI configuration. The UI offers no per-tab
+    permission readback. Required policy: preserve an actually verified saved
+    level per tab; otherwise explicitly use restricted permissions, never infer
+    blanket full access. Native permission evidence must be obtained without
+    changing the live session merely to query it.
+    Evidence: model.py:46-56; agents.py:99-102,351-355;
+    official Codex CLI reference on configuration defaults and overrides.
+
+17. Build, installation and recovery generations are easy to conflate.
+    OBSERVED/SOURCE-CONFIRMED. The handover records a different installed version
+    on its original Mac. This Mac still has the older backend. Building into
+    dist does not update the installed app. The rebuilt application also uses
+    Recovery-v2 while legacy parked records remain under Car Park and are not
+    imported. "Show Previous Recovery Files" exposes a folder, not a complete
+    recovery/import flow. Verification must identify the exact installed build,
+    backend hashes and recovery generation involved.
+    Evidence: HANDOVER.txt; README recovery section; build/install scripts;
+    Models.swift:revealGarage/revealPreviousRecovery; installed bundle inspection.
+
+18. One invalid recovery record can block the whole recovery library.
+    SOURCE-CONFIRMED resilience gap; not observed as the production incident.
+    Store.all validates every row as one operation and raises on a bad one.
+    The presentation builds its entire car list through Store.all, so it has
+    no way to show intact records alongside a separately identified bad row.
+    Corrupt recovery should be visible and retained without hiding good saves.
+    Evidence: parking/store.py:136-142; garage.py:169-180.
+
+Findings: test design and acceptance
+------------------------------------
+19. A normal release can be launched in the fixture-scoped mode.
+    SOURCE-CONFIRMED. --test-scope is accepted by the normal Swift application;
+    its backend and the outer shim are included in the release bundle. That
+    mode changes both the visible window set and recovery location. Opening an
+    already-running scoped instance normally can keep that instance active.
+    Normal --live Park All itself enumerates all windows, with no special
+    agent-window exclusion. The release should have an unambiguous whole-desktop
+    path; fixture isolation belongs in separate developer tooling.
+    Evidence: Models.swift:165-192; service.py:21-43; Rebuild/build.sh:19-22.
+
+20. Current live proofs do not establish the user's Backtrace/whole-desktop flow.
+    SOURCE-CONFIRMED and acknowledged in the handover. prove_garage seeds new
+    conversations and invokes a backend helper through a protective scope. It
+    does not click the normal installed UI, close the runner's own window, or
+    exercise old Backtrace-opened conversations. Backtrace launches through an
+    interactive login shell into the frontmost window; fresh fixtures use a
+    different launch/ownership path. Warm resume endpoints, permission-bearing
+    command lines, established working directories and existing tabs need actual
+    coverage. The resume-confirmation parser accepts only a three-token command;
+    adding permission flags without auditing that parser introduces a new gap.
+    Evidence: prove_garage.py:146-199; parking/lab.py; confirmation.py:24-40;
+    Backtrace Sources/Backtrace/Store.swift and BacktraceCore/TerminalScript.swift.
+
+21. Confirmation automation and fixture setup can block the testing agent.
+    OBSERVED. The AX helper lacks Accessibility access here; its pending normal
+    close cannot be clicked automatically. Fresh directories inside the untrusted
+    checkout also stopped both agents at trust screens. Those were not usable
+    resumed sessions. Per-profile close prompting and global multi-session
+    prompting are separate iTerm settings; changing a preference does not answer
+    a dialog that was already displayed. At Jacob's explicit request, both close
+    settings, quit confirmation and the profile notification categories were
+    disabled and read back. These user settings are separate from app fixes.
+
+22. Timing evidence is inadequate for the production latency diagnosis.
+    SOURCE-CONFIRMED. Park All and per-tab operations serialize many full
+    observations and provider calls. A client-exit wait can reach 45 seconds,
+    settling/checking adds separate waits, and ordinary transition events have
+    no timestamp. The prototype's profiled two-tab park made 37 terminal-list
+    calls and eight observations; the outer test shim and the prototype's added
+    reads contributed substantially. Those timings are NOT the unchanged
+    production app's baseline. A pristine-source read-only scan here took about
+    1.7 seconds for three windows/seven tabs; that is not a park/restore timing.
+    Evidence: agents.py:finish_client_close; workflow.py; operations.py;
+    store.py:186-190; local profiles and pristine-readonly-scan artifacts.
+
+What is supported by the evidence
+----------------------------------
+- The original incident is not explained by a card merely losing six titles:
+  the handover describes only one returned target as well as the misleading UI.
+- The unchanged workflow's stop-after-first behaviour is reproducible under
+  the documented class of second-tab refusal. The original native mismatch
+  itself remains unresolved.
+- The schema retains all seven source tabs in the controlled reproduction.
+  This audit does not establish that original transcripts were deleted.
+- A fresh mixed two-tab prototype completed two live cycles before this audit.
+  That establishes those particular cycles, not the unmodified seven-tab
+  Backtrace case or normal installed-app whole-desktop acceptance.
+- The pristine branch's 290 rebuild tests, 171 outer Python tests, Swift
+  bridge/model checks and JXA object-model checks pass. The product failures
+  coexist with those passes.
+- Five screens were rendered from unchanged SwiftUI source using clearly
+  fictional data: seven saved, one of seven returned, tab details, opening,
+  and five parked windows. The offscreen spinner rendering is not treated as
+  a native product defect. These are visual inspections, not live UI clicks.
+
+The combined product contract to establish before implementation
+---------------------------------------------------------------
+1. Park All accounts for every live window. Normal operation has no exclusion
+   for the supervising agent. A controller outside the closing terminals must
+   preserve its plan/results independently when testing the whole desktop.
+2. Before close: show every source tab and persist its exact conversation,
+   folder, order and permission evidence. Identify unusable launch conditions
+   while the original windows still exist.
+3. During restore: track each tab separately as saved/submitted/started/verified
+   or needing action. A definite read/refusal and an unknown submitted result
+   have different recovery actions. Keep valid returned tabs and finish the
+   remaining ones without silently duplicating sessions.
+4. The main UI exposes all saved names and exact restored/remaining counts.
+   Its action labels and progress describe the operation actually happening.
+5. Permission restoration is per tab and explicit. Unavailable evidence uses a
+   restricted fallback. Full access is never applied as a blanket convenience.
+6. Decide and verify saved-title and window-layout restoration as part of the
+   product's scope. Preserve existing recovery through version transitions.
+
+Acceptance matrix required after the diagnosis is addressed
+-----------------------------------------------------------
+- Actual Backtrace-opened historical conversations, including a mixed seven-tab
+  window; same folders/titles and different folders; manual tab names; supported
+  CLI installation variants and mixed permission levels.
+- Multiple windows with uneven tab counts; all windows accounted for; no test
+  launch mode; installed UI actions; external supervision of the closing agent.
+- Repeated idle and interrupted-work cycles; continuation tested separately
+  from exact conversation recovery.
+- A read race, an extra/moved tab, a failed CLI launch, a disappearing returned
+  target, restart after tab one, and both definite and ambiguous failures.
+- Native verification of every session ID, cwd, order and grouping; permission
+  readback where available; visible saved/returned counts; retry without extra
+  launches/messages; retained recovery and receipt-owned test cleanup.
+
+Local evidence, intentionally uncommitted
+----------------------------------------
+.local/HolisticAudit/contract-reproductions.json
+.local/HolisticAudit/reproduce_contracts.py
+.local/HolisticAudit/baseline-seven-parked.png
+.local/HolisticAudit/baseline-one-of-seven-opened.png
+.local/HolisticAudit/baseline-seven-tab-details.png
+.local/HolisticAudit/baseline-opening-seven-tabs.png
+.local/HolisticAudit/baseline-five-windows.png
+.local/HolisticAudit/pristine-readonly-scan.json
+.local/HolisticAudit/pristine-readonly-scan.pstats
+.local/HolisticAudit/uninstalled-prototype.patch
+
+Private paths, native session IDs, transcripts and recovery databases remain
+local. This is a diagnosis and acceptance specification, not release approval.

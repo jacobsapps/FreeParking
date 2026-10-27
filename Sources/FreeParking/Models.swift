@@ -13,6 +13,8 @@ struct AgentTab: Decodable, Identifiable, Sendable {
     let issue: String
     let resumeCommand: String?
     var needsConfirmation: Bool? = nil
+    var permissionLabel: String? = nil
+    var restoreState: String? = nil
 
     var id: Int { index }
     var folder: String { cwd.isEmpty ? "Unidentified tab" : (cwd as NSString).lastPathComponent }
@@ -85,6 +87,17 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
     var tabNamesHelp: String {
         tabs.enumerated().map { "\($0.offset + 1). \($0.element.displayTitle)" }.joined(separator: "\n")
     }
+    var openedTabCount: Int {
+        tabs.indices.filter { index in
+            guard let target = restoredTargets?[String(index)] else { return false }
+            return !target.windowId.isEmpty && !target.terminalId.isEmpty
+        }.count
+    }
+    var partialRestoreLabel: String? {
+        let count = openedTabCount
+        guard count > 0 && count < tabs.count else { return nil }
+        return "\(count) of \(tabs.count) tabs opened"
+    }
 
     var displayTitle: String {
         if let windowTitle, !windowTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return windowTitle }
@@ -97,7 +110,8 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
         return fractional.date(from: createdAt) ?? ISO8601DateFormatter().date(from: createdAt) ?? .distantPast
     }
     var isChecking: Bool { status == "checking" }
-    var canFinishParking: Bool { status == "finish_parking" }
+    var canFinishParking: Bool { status == "finish_parking" || (status == "saved_open" && pendingTab == nil) }
+    var actionLabel: String { canFinishParking ? "Finish parking" : isChecking ? "Check status" : allLaunchesRecorded ? "Finish restoring window" : openedTabCount > 0 ? "Open remaining tabs" : "Open in iTerm" }
     var statusLabel: String {
         if isChecking { return "Awaiting confirmation" }
         if canFinishParking { return "Ready to finish parking" }
@@ -116,7 +130,7 @@ struct ParkedCar: Decodable, Identifiable, Sendable {
         return !["parked", "restored"].contains(status) && !allLaunchesRecorded
     }
     var hasReturned: Bool { returnVerified ?? (status == "restored" || allLaunchesRecorded) }
-    var commands: String { tabs.compactMap(\.resumeCommand).joined(separator: "\n\n") }
+    var commands: String { tabs.filter { restoredTargets?[String($0.index)] == nil && pendingTab != $0.index }.compactMap(\.resumeCommand).joined(separator: "\n\n") }
 
     func withStatus(_ status: String, note: String) -> ParkedCar {
         ParkedCar(id: id, createdAt: createdAt, status: status, note: note, tabs: tabs, filePath: filePath, windowTitle: windowTitle,
@@ -152,6 +166,9 @@ enum OperationCompletion {
                      invoke: ([String]) throws -> BackendResponse) throws -> BackendResponse {
         var response = try invoke(arguments)
         guard ["park", "park-all", "park-confirmed", "restore", "check", "finish-parking"].contains(arguments.first ?? "") else { return response }
+        // A batch summary describes every saved window; a check of its last
+        // record must not replace that summary and hide the remaining windows.
+        if arguments.first == "park-all" { return response }
         guard let operationID = response.operationId else { return response }
         for _ in 0..<max(0, checks) {
             guard response.operationStatus == "checking" else { break }
@@ -163,12 +180,16 @@ enum OperationCompletion {
 
 enum LocalBackend {
     static var testScope: String? {
+        #if DEBUG
         let prefix = "--test-scope="
         return ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) })
             .map { String($0.dropFirst(prefix.count)) }
+        #else
+        return nil
+        #endif
     }
 
-    static func call(_ arguments: [String]) throws -> BackendResponse {
+    static func call(_ arguments: [String], progress: (@Sendable (String) -> Void)? = nil) throws -> BackendResponse {
         guard !PreviewMode.enabled else {
             throw BackendError("Terminal access is disabled in the UI preview.")
         }
@@ -189,7 +210,7 @@ enum LocalBackend {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
         let scopeArguments = testScope.map { ["--test-scope", $0] } ?? ["--live"]
-        process.arguments = [script.path] + scopeArguments + arguments
+        process.arguments = [script.path] + scopeArguments + ["--progress"] + arguments
         let output = Pipe()
         process.standardOutput = output
         // A separate file avoids pipe deadlocks if macOS emits long permission errors.
@@ -203,7 +224,21 @@ enum LocalBackend {
         }
         process.standardError = errorFile
         try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+        var buffer = Data()
+        var data = Data()
+        while true {
+            let chunk = output.fileHandleForReading.availableData
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 10) {
+                let line = Data(buffer[..<newline])
+                buffer.removeSubrange(...newline)
+                if let object = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+                   let text = object["progress"] as? String { progress?(text) }
+                else if !line.isEmpty { data = line }
+            }
+        }
+        if !buffer.isEmpty { data = buffer }
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {
             let detail = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? ""
@@ -258,6 +293,7 @@ final class Garage: ObservableObject {
     @Published var windows: [LiveWindow] = []
     @Published var busy = false
     @Published var activity = ""
+    @Published private(set) var operationStartedAt: Date?
     @Published var message = ""
     @Published var problem: String?
     @Published var hasScanned = false
@@ -441,6 +477,7 @@ final class Garage: ObservableObject {
         activeCarID = carID
         removingCar = arguments.first == "remove"
         self.activity = activity
+        operationStartedAt = .now
         problem = nil
         message = ""
         if let carID { carIssues[carID] = nil }
@@ -448,7 +485,11 @@ final class Garage: ObservableObject {
             var failure: String?
             do {
                 let response = try await Task.detached(priority: .userInitiated) {
-                    try OperationCompletion.call(arguments, invoke: LocalBackend.call)
+                    try OperationCompletion.call(arguments) { args in
+                        try LocalBackend.call(args) { text in
+                            Task { @MainActor in self.activity = text }
+                        }
+                    }
                 }.value
                 let previous = cars
                 let verifiedIDs = Set(response.verifiedArchivedIds ?? [])
@@ -467,7 +508,7 @@ final class Garage: ObservableObject {
                 archives = response.archives ?? []
                 if let settings = response.settings { preferences = settings }
                 pendingConfirmation = response.confirmation
-                if ["scan", "park-all", "park-confirmed"].contains(arguments.first ?? "") {
+                if ["scan", "park", "park-all", "park-confirmed", "restore", "check", "finish-parking"].contains(arguments.first ?? "") {
                     windows = response.windows
                     hasScanned = response.ok || !response.windows.isEmpty
                 } else if !["list", "settings"].contains(arguments.first ?? "") {
@@ -475,7 +516,7 @@ final class Garage: ObservableObject {
                     windows = []
                     hasScanned = false
                 }
-                if carID == nil { message = response.message ?? "" }
+                message = response.message ?? ""
                 if !response.ok { failure = response.error ?? "The operation did not finish." }
                 if response.errorCode == "automation_denied" {
                     automationDenied = true
@@ -504,6 +545,7 @@ final class Garage: ObservableObject {
             activeCarID = nil
             removingCar = false
             self.activity = ""
+            operationStartedAt = nil
         }
     }
 

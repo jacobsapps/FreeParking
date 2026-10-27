@@ -83,7 +83,7 @@ class Observer:
                         problems.append('Tab ' + str(index + 1) + ': ' + tab_issues[tid])
             if not window['tabs']: problems.append('Empty window.')
             if problems: issues[window['id']] = '\n'.join(problems)
-            else: windows.append(Window(window['id'], tuple(tabs)))
+            else: windows.append(Window(window['id'], tuple(tabs), window.get('bounds', {})))
         return Observation(tuple(raw), tuple(windows), issues, tab_issues, resolved, candidates, unresolved)
 
 

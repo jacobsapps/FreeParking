@@ -43,11 +43,13 @@ def complete_request(invoke, arguments, checks=2):
 
 
 class BundleBackend:
-    def __init__(self, backend, scope, helper):
+    def __init__(self, backend, scope, helper, approve_confirmations=True, profile=False):
         self.backend, self.scope, self.helper = Path(backend), scope, Path(helper)
         self.count = 0
         self.responses = []
         self.approved = set()
+        self.approve_confirmations = approve_confirmations
+        self.profile = profile
 
     def authorize_pending(self, driver, terminal, request):
         try:
@@ -64,6 +66,8 @@ class BundleBackend:
 
     def approve_owned_sheet(self):
         """Approve a pending sheet only; never submit a close ourselves."""
+        if not self.approve_confirmations:
+            return  # Respect user-managed iTerm settings; no AX access needed.
         scope = Scope(self.scope.path)
         terminal, processes = ITerm(), Processes()
         raw = terminal.windows()
@@ -99,7 +103,18 @@ class BundleBackend:
         directory = self.scope.path.parent / 'production-calls'
         directory.mkdir(exist_ok=True, mode=0o700)
         prefix = directory / str(self.count)
-        command = ['/usr/bin/python3', str(self.backend), '--test-scope', str(self.scope.path), *arguments]
+        # Scope code is external to the release bundle. Inject it only into
+        # this supervised helper process, never the installed app.
+        launcher = self.scope.path.parent/'bundle-test-launcher.py'
+        launcher.write_text('import sys, importlib.util\n'
+            + 'sys.path.insert(0, '+repr(str(ROOT/'Resources'))+')\n'
+            + 'sys.path.insert(0, '+repr(str(self.backend.parent))+')\n'
+            + 'spec=importlib.util.spec_from_file_location("parking.testing", '+repr(str(ROOT/'Rebuild/parking/testing.py'))+')\n'
+            + 'module=importlib.util.module_from_spec(spec); sys.modules["parking.testing"]=module; spec.loader.exec_module(module)\n'
+            + 'from parking.garage import main\nmain()\n')
+        command = ['/usr/bin/python3', str(launcher), '--test-scope', str(self.scope.path), *arguments]
+        if self.profile:
+            command[1:1] = ['-m', 'cProfile', '-o', str(prefix.with_suffix('.pstats'))]
         atomic_json(prefix.with_suffix('.request.json'), dict(arguments=arguments, backend=str(self.backend)))
         confirmation_error = None
         with prefix.with_suffix('.stdout').open('w') as stdout, prefix.with_suffix('.stderr').open('w') as stderr:
@@ -143,17 +158,17 @@ def continuation_counts(agents):
     return counts
 
 
-def run(directory, backend, windows=4, tabs=5, busy=False, allow_protected_additions=False):
+def run(directory, backend, windows=4, tabs=5, busy=False, allow_protected_additions=False, approve_confirmations=True):
     directory, backend = Path(directory).resolve(), Path(backend).resolve()
     if directory.exists(): raise ParkingError('Use a new directory; never replace a protective baseline.')
     if not backend.is_file(): raise ParkingError('Build the production bundle first; backend is missing.')
     helper = ROOT / '.build/rebuild-close-confirmation'
-    if not helper.is_file(): raise ParkingError('Build the scoped confirmation helper first.')
+    if approve_confirmations and not helper.is_file(): raise ParkingError('Build the scoped confirmation helper first.')
     directory.mkdir(parents=True, mode=0o700)
     scope = Scope.capture(directory / 'scope.json', ITerm(), Processes(), ['fixture-init-only'],
                           allow_protected_additions=allow_protected_additions)
-    runner = BundleBackend(backend, scope, helper)
-    report = dict(status='incomplete', allow_protected_additions=allow_protected_additions, evidence='Production bundle helper, not installed UI acceptance',
+    runner = BundleBackend(backend, scope, helper, approve_confirmations)
+    report = dict(status='incomplete', allow_protected_additions=allow_protected_additions, approve_confirmations=approve_confirmations, evidence='Production bundle helper, not installed UI acceptance',
                   backend=str(backend), backend_sha256=hashlib.sha256(backend.read_bytes()).hexdigest(),
                   module_hashes={str(p.relative_to(backend.parent)):hashlib.sha256(p.read_bytes()).hexdigest()
                                  for p in (backend.parent/'parking').glob('*') if p.is_file()},
@@ -214,7 +229,9 @@ if __name__ == '__main__':
     parser.add_argument('--busy', action='store_true')
     parser.add_argument('--allow-protected-additions', action='store_true',
         help='New scope only: permit additional user tabs while preserving every original protected tab.')
+    parser.add_argument('--no-confirmation-helper', action='store_true',
+        help='Do not drive close sheets. Use when the user has already disabled iTerm close prompts; never changes preferences.')
     args = parser.parse_args()
     if not 1 <= args.windows <= 4 or not 2 <= args.tabs <= 8: parser.error('Use 1–4 windows and 2–8 tabs.')
-    run(args.directory, args.backend, args.windows, args.tabs, args.busy, args.allow_protected_additions)
+    run(args.directory, args.backend, args.windows, args.tabs, args.busy, args.allow_protected_additions, not args.no_confirmation_helper)
     print('Production helper acceptance passed. Owned fixture windows retained for scoped cleanup; installed UI not claimed.')
