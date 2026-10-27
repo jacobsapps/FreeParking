@@ -214,3 +214,15 @@ Local evidence on original Mac (NOT included in Git)
 Rebuild/STATUS.txt contains the chronological, qualified prior checkpoints.
 Raw databases, transcripts, screenshots, session identities and absolute private
 paths intentionally remain on the original machine.
+
+Post-handover read-only observation, 2026-10-27
+----------------------------------------------
+A subsequent native iTerm inventory completed in approximately 0.46 seconds.
+Both recorded first-tab targets were still present in their recorded windows,
+with their exact launch receipts intact. One destination now contained two tabs,
+the other four. The extra tabs had no Free Parking launch receipt. This explains
+why the strict entire-window equality guard would reject appending NOW; it does
+not establish who created those tabs or whether they existed at the original
+failure. Do not adopt or close them. Current state is not historical causality.
+No terminal was created, closed, interrupted, typed into or retitled by this
+observation. The raw inventory is private and remains only on the original Mac.
